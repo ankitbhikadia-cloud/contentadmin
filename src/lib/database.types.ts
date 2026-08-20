@@ -204,6 +204,7 @@ export type Database = {
           trend_score: number | null;
           updated_at: string;
           visibility: string;
+          youtube_video_id: string | null;
         };
         Insert: {
           allow_comments?: boolean;
@@ -226,6 +227,7 @@ export type Database = {
           trend_score?: number | null;
           updated_at?: string;
           visibility?: string;
+          youtube_video_id?: string | null;
         };
         Update: {
           allow_comments?: boolean;
@@ -248,6 +250,7 @@ export type Database = {
           trend_score?: number | null;
           updated_at?: string;
           visibility?: string;
+          youtube_video_id?: string | null;
         };
         Relationships: [
           {

@@ -1,4 +1,4 @@
-import { getChannels, getShorts } from "@/lib/data";
+import { getChannels, getShorts, QUEUE_STATUSES } from "@/lib/data";
 import QueueClient from "./QueueClient";
 
 export const dynamic = "force-dynamic";
@@ -14,7 +14,7 @@ export default async function QueuePage({
   const { ch } = await searchParams;
   const [channels, shorts] = await Promise.all([
     getChannels(),
-    getShorts({ channelId: ch ?? null }),
+    getShorts({ channelId: ch ?? null, statuses: QUEUE_STATUSES }),
   ]);
 
   return <QueueClient shorts={shorts} channels={channels} activeChannel={ch ?? null} />;

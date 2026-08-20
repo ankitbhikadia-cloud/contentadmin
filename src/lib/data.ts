@@ -73,6 +73,7 @@ export async function getDueShorts(limit = 5): Promise<Short[]> {
 
 export async function getShorts(opts?: {
   channelId?: string | null;
+  statuses?: string[];
 }): Promise<Short[]> {
   const supabase = await createClient();
   let query = supabase
@@ -80,10 +81,18 @@ export async function getShorts(opts?: {
     .select("*")
     .order("created_at", { ascending: false });
   if (opts?.channelId) query = query.eq("channel_id", opts.channelId);
+  if (opts?.statuses?.length) query = query.in("status", opts.statuses);
   const { data, error } = await query;
   if (error) throw error;
   return data ?? [];
 }
+
+// The Queue is triage only — draft and needs_review, i.e. shorts that
+// still need a content decision. Anything past that (approved, scheduled,
+// live, failed) has moved on to timeline concerns instead of content
+// ones, so it now lives exclusively on the Calendar — see queue/page.tsx
+// and CalendarClient.tsx.
+export const QUEUE_STATUSES = ["draft", "needs_review"];
 
 export async function getShortById(id: string): Promise<Short | null> {
   const supabase = await createClient();

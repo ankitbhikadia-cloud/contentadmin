@@ -8,6 +8,7 @@ const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const YOUTUBE_UPLOAD_URL =
   "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=multipart&part=snippet,status";
+const YOUTUBE_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos";
 
 const SCOPES = [
   "https://www.googleapis.com/auth/youtube.upload",
@@ -160,4 +161,69 @@ export async function uploadVideoToYoutube(
   const json = await res.json();
   if (!json.id) throw new Error("YouTube upload response had no video id.");
   return { videoId: json.id };
+}
+
+export type YoutubeVideoStatus = {
+  privacyStatus: string;
+  publishAt?: string;
+  selfDeclaredMadeForKids?: boolean;
+  [key: string]: unknown;
+};
+
+/**
+ * Fetches a video's current `status` part. Used before rescheduling to
+ * check whether it's already actually public — YouTube's own scheduled-
+ * publish mechanism flips privacyStatus from "private" to "public" itself
+ * once publishAt passes, and there's no undoing that back into a future
+ * scheduled state, so a reschedule attempt on an already-public video
+ * needs to be rejected with a clear reason rather than silently no-op'd
+ * or sent to the API to fail unpredictably.
+ */
+export async function getVideoStatus(
+  accessToken: string,
+  videoId: string
+): Promise<YoutubeVideoStatus | null> {
+  const res = await fetch(
+    `${YOUTUBE_VIDEOS_URL}?part=status&id=${encodeURIComponent(videoId)}`,
+    { headers: { authorization: `Bearer ${accessToken}` } }
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`YouTube video status lookup failed (${res.status}): ${body.slice(0, 300)}`);
+  }
+  const json = await res.json();
+  const item = json?.items?.[0];
+  if (!item) return null; // deleted/inaccessible on YouTube's side
+  return item.status ?? null;
+}
+
+/**
+ * Moves a video's scheduled publish time. videos.update replaces the
+ * whole `status` part with whatever's sent, not a partial patch, so this
+ * merges the new publishAt into the status YouTube already has (fetched
+ * by the caller via getVideoStatus) instead of sending a bare
+ * {publishAt} that would silently reset privacyStatus/madeForKids to
+ * API defaults.
+ */
+export async function updateScheduledPublishTime(
+  accessToken: string,
+  videoId: string,
+  currentStatus: YoutubeVideoStatus,
+  publishAt: string
+): Promise<void> {
+  const res = await fetch(`${YOUTUBE_VIDEOS_URL}?part=status`, {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      id: videoId,
+      status: { ...currentStatus, privacyStatus: "private", publishAt },
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`YouTube reschedule failed (${res.status}): ${body.slice(0, 300)}`);
+  }
 }

@@ -4,7 +4,8 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { draftShortMetadata } from "@/lib/ai";
 import { draftMetadataFromVideo } from "@/lib/gemini";
-import { publishShort, type PublishResult } from "@/lib/publish";
+import { publishShort, getValidAccessToken, type PublishResult } from "@/lib/publish";
+import { getVideoStatus, updateScheduledPublishTime } from "@/lib/youtube";
 import { getDueShorts } from "@/lib/data";
 
 export async function approveShort(id: string) {
@@ -64,30 +65,96 @@ export async function addReview(shortId: string, author: string, body: string) {
   revalidatePath(`/shorts/${shortId}`);
 }
 
-export async function setSlot(shortId: string, slotAtIso: string | null) {
+export type RescheduleResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * Moves a short's calendar slot. Used both for giving an unscheduled
+ * short its first slot (drag from the Inbox) and for moving an
+ * already-scheduled one (drag between days, or the precise date/time
+ * editor) — see CalendarClient.tsx, where every call here is gated
+ * behind an explicit confirm step first.
+ *
+ * A short that's already "live" needs real YouTube coordination: if it
+ * was uploaded early (via "Publish now" while its slot was still in the
+ * future — see publish.ts), the video exists on YouTube already, privately
+ * scheduled for that original time. Moving the date here without also
+ * moving it there would leave our calendar and the actual YouTube publish
+ * time silently disagreeing, so this calls YouTube's videos.update to
+ * keep them in sync — and refuses outright if the video's already
+ * actually public, since there's no "scheduled time" left to change at
+ * that point. Anything not yet live has nothing on YouTube to keep in
+ * sync with, so that path stays a plain DB update, same as before.
+ */
+export async function setSlot(
+  shortId: string,
+  slotAtIso: string | null
+): Promise<RescheduleResult> {
   const supabase = await createClient();
-  const nextStatus = slotAtIso ? "scheduled" : "draft";
-  const { data: current } = await supabase
+  const { data: current, error: fetchErr } = await supabase
     .from("shorts")
-    .select("status")
+    .select("status, channel_id, youtube_video_id")
     .eq("id", shortId)
     .maybeSingle();
+  if (fetchErr) return { ok: false, error: fetchErr.message };
+  if (!current) return { ok: false, error: "Short not found." };
 
-  // Don't downgrade a short that's already further along (approved/live/failed).
-  const keepStatus =
-    current && !["draft", "needs_review", "scheduled"].includes(current.status);
+  if (current.status === "live") {
+    if (!slotAtIso) {
+      return { ok: false, error: "A live short can't be sent back to the unscheduled inbox." };
+    }
+    const videoId = current.youtube_video_id;
+    if (!videoId) {
+      return {
+        ok: false,
+        error:
+          "This short has no recorded YouTube video id (it was likely uploaded before this feature shipped), so its schedule can't be safely changed here.",
+      };
+    }
+    try {
+      const accessToken = await getValidAccessToken(supabase, current.channel_id);
+      const status = await getVideoStatus(accessToken, videoId);
+      if (!status) {
+        return { ok: false, error: "Couldn't find this video on YouTube anymore." };
+      }
+      if (status.privacyStatus === "public") {
+        return {
+          ok: false,
+          error: "This video is already public on YouTube — its publish time can't be changed anymore.",
+        };
+      }
+      await updateScheduledPublishTime(accessToken, videoId, status, slotAtIso);
+    } catch (err) {
+      console.error(`setSlot(${shortId}) YouTube reschedule failed:`, err);
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : "Couldn't reschedule on YouTube.",
+      };
+    }
 
-  const { error } = await supabase
-    .from("shorts")
-    .update({
-      slot_at: slotAtIso,
-      ...(keepStatus ? {} : { status: nextStatus }),
-    })
-    .eq("id", shortId);
-  if (error) throw error;
+    const { error } = await supabase
+      .from("shorts")
+      .update({ slot_at: slotAtIso })
+      .eq("id", shortId);
+    if (error) return { ok: false, error: error.message };
+  } else {
+    const nextStatus = slotAtIso ? "scheduled" : "draft";
+    // Don't downgrade a short that's already further along (approved/failed).
+    const keepStatus = !["draft", "needs_review", "scheduled"].includes(current.status);
+    const { error } = await supabase
+      .from("shorts")
+      .update({
+        slot_at: slotAtIso,
+        ...(keepStatus ? {} : { status: nextStatus }),
+      })
+      .eq("id", shortId);
+    if (error) return { ok: false, error: error.message };
+  }
+
   revalidatePath("/calendar");
   revalidatePath("/queue");
   revalidatePath("/dashboard");
+  revalidatePath(`/shorts/${shortId}`);
+  return { ok: true };
 }
 
 export type ImportBatchSettings = {

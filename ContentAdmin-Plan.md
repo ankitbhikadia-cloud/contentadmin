@@ -383,3 +383,83 @@ either.
 Lesson for future RLS migrations on this project: never guess a policy
 name in a `drop policy` statement — query `pg_policies` first, every
 time, even for "obviously" named policies.
+
+### Video-aware "Draft with AI" (Gemini), plus two bugs it exposed
+
+Added `src/lib/gemini.ts`: real Gemini File API upload + poll +
+`generateContent`, used by the single-short "Draft with AI" button when
+`GEMINI_API_KEY` is configured and the short has a video file — it
+actually watches (and listens to) the clip, rather than drafting from
+title/filename context only. Falls back to the existing Claude text-only
+path (`src/lib/ai.ts`) when either condition isn't met; bulk "Generate
+metadata" and "Draft on import" stay text-only deliberately (10
+sequential video round-trips would risk the function's time budget).
+`generateContent` retries on 429/503 with jittered backoff — Gemini's
+own docs describe these as transient, and a first version of this
+without retries surfaced a real "high demand" 503 straight to the user.
+
+This shipped with two real gaps, both hit in production and fixed
+directly on the live DB/repo rather than just noted:
+- `shorts_metadata_source_check` was never updated to allow the new
+  `"ai_video"` value — every video-aware draft failed with a check
+  constraint violation the first time someone actually used the button.
+  Fixed live via migration `0008`.
+- `ShortDetailClient`'s title/description/tags fields are local state
+  seeded once from the `short` prop; `router.refresh()` after a draft
+  gives the component a fresh prop, but nothing re-synced it into that
+  local state, so only the read-only heading (which renders `short.title`
+  directly) visibly updated. Added a `useEffect` keyed on the server's
+  actual title/description/tags content (not the `tags` array reference,
+  which is a new array every refresh regardless of content) so it
+  re-syncs on a real change without clobbering an in-progress unsaved
+  edit on unrelated refreshes.
+
+### Queue vs. Calendar split, and real calendar rescheduling
+
+Previously the Queue's "Approved"/"Out" board columns kept showing a
+short forever, even once it had a real slot and nothing left to triage —
+and the Calendar could only give an *unscheduled* short its first slot;
+an already-scheduled one couldn't be moved at all, there was no way to
+set an exact time (only a fixed 4-slot daily rotation), and every drop
+committed immediately with no confirmation.
+
+- **Queue is triage-only now.** `getShorts` takes an optional `statuses`
+  filter; the Queue page passes `QUEUE_STATUSES = ["draft",
+  "needs_review"]`. Approving (or scheduling) a short now makes it
+  disappear from the Queue entirely — Calendar is the only place left to
+  manage its timing from that point on.
+- **Calendar can now move anything, with confirmation.** Already-
+  scheduled pills are draggable (previously only Inbox items were), each
+  has a pencil button opening an exact `datetime-local` editor (not just
+  the 4-slot rotation), and every move — drag or precise edit — stages a
+  confirm dialog (`"Move X from A to B?"`) before anything is written.
+- **Rescheduling a live short now actually updates YouTube.** This
+  needed a real gap fixed first: `publishShort` never persisted the
+  `videoId` `uploadVideoToYoutube` returned anywhere, so there was no way
+  to find a live short's actual YouTube video again afterward. Added
+  `shorts.youtube_video_id` (migration `0009`), now set when a short goes
+  live. `setSlot` (in `actions.ts`) now branches on status: anything not
+  yet live is a plain `slot_at` update, same as before; a live short
+  fetches the video's current status from YouTube
+  (`getVideoStatus`), refuses if it's already actually `public` (nothing
+  left to reschedule at that point — surfaced as a clear error in the
+  confirm dialog, not a silent no-op or a raw API error), and otherwise
+  calls `updateScheduledPublishTime` (`videos.update?part=status`,
+  merging the existing status rather than sending a bare `publishAt`,
+  since `videos.update` replaces the whole part) before updating our own
+  `slot_at`. This only actually fires for a short uploaded early via
+  "Publish now" while its slot was still in the future — a short the
+  cron itself uploads is by definition already due, so it's genuinely
+  public immediately and calendar-locked (greyed out, not draggable, no
+  pencil button) the moment it's live.
+- `setSlot` changed from throw-on-error to returning `{ok, error?}` so
+  the Calendar can actually show a rejected reschedule instead of an
+  unhandled promise rejection — it's called from a client component's
+  `useTransition`, which doesn't surface thrown errors as anything
+  visible to the user.
+
+Assumption worth flagging: "shuffling needs confirmation" was
+interpreted as covering individual moves (drag or the exact-time editor)
+— bulk "Auto-slot the inbox" stayed a single immediate action, since the
+button click is itself the deliberate/explicit step and a per-item
+confirm across a whole batch would defeat the point of "auto".

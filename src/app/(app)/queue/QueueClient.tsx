@@ -15,11 +15,13 @@ import {
 } from "@/lib/format";
 import { bulkApprove, bulkDraftMetadata } from "@/lib/actions";
 
+// The Queue only ever contains draft/needs_review shorts now (see
+// QUEUE_STATUSES in src/lib/data.ts) — approving or scheduling one moves
+// it off this list entirely and onto the Calendar, so there's no longer
+// an "Approved"/"Out" column to show here.
 const BOARD_COLUMNS: { key: string; label: string; statuses: string[] }[] = [
   { key: "draft", label: "Draft", statuses: ["draft"] },
   { key: "needs_review", label: "Needs review", statuses: ["needs_review"] },
-  { key: "approved", label: "Approved", statuses: ["approved"] },
-  { key: "out", label: "Out", statuses: ["scheduled", "live", "failed"] },
 ];
 
 export default function QueueClient({
@@ -89,10 +91,11 @@ export default function QueueClient({
         <div className="flex-1" style={{ minWidth: 240 }}>
           <h1 style={{ fontSize: 34, margin: "0 0 4px" }}>Queue</h1>
           <p className="text-muted" style={{ margin: 0, fontSize: "13.5px" }}>
-            {shorts.length} short{shorts.length === 1 ? "" : "s"} in flight
-            {activeChannelName ? ` on ${activeChannelName}` : ""}. Approve one
-            and, once it&apos;s scheduled on a connected channel, the
-            auto-uploader publishes it for real at its slot.
+            {shorts.length} short{shorts.length === 1 ? "" : "s"} still need
+            {shorts.length === 1 ? "s" : ""} a look
+            {activeChannelName ? ` on ${activeChannelName}` : ""}. Approving
+            one moves it off this list and onto the Calendar, where you set
+            or change its actual publish time.
           </p>
         </div>
         <div className="flex gap-2 items-center">
@@ -197,7 +200,9 @@ export default function QueueClient({
               {shorts.length === 0 && (
                 <tr>
                   <td colSpan={7} className="text-muted" style={{ padding: "var(--space-4)", textAlign: "center" }}>
-                    No shorts yet — import some to get started.
+                    Nothing needs a look right now — import some clips, or
+                    check the Calendar for what&apos;s already approved and
+                    scheduled.
                   </td>
                 </tr>
               )}

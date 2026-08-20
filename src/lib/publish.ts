@@ -7,6 +7,43 @@ export type PublishResult = { ok: true; videoId: string } | { ok: false; error: 
 type SupabaseLike = Awaited<ReturnType<typeof createClient>>;
 
 /**
+ * Returns a live YouTube access token for a channel, refreshing it first
+ * if it's missing or about to expire (and persisting the refreshed token
+ * back onto the channel row). Shared by publishShort below and by the
+ * calendar reschedule path in actions.ts's setSlot, which needs a token
+ * for the exact same reason — calling the YouTube API on this channel's
+ * behalf — without repeating a second copy of this refresh dance.
+ */
+export async function getValidAccessToken(
+  supabase: SupabaseLike,
+  channelId: string
+): Promise<string> {
+  const tokens = await getChannelTokens(supabase, channelId);
+  if (!tokens || !tokens.youtube_connected || !tokens.youtube_refresh_token) {
+    throw new Error("This channel isn't connected to YouTube yet.");
+  }
+
+  let accessToken = tokens.youtube_access_token;
+  const expired =
+    !tokens.youtube_token_expires_at ||
+    new Date(tokens.youtube_token_expires_at).getTime() < Date.now() + 60_000;
+  if (!accessToken || expired) {
+    const refreshed = await refreshAccessToken(tokens.youtube_refresh_token);
+    accessToken = refreshed.access_token;
+    await supabase
+      .from("channels")
+      .update({
+        youtube_access_token: refreshed.access_token,
+        youtube_token_expires_at: new Date(
+          Date.now() + refreshed.expires_in * 1000
+        ).toISOString(),
+      })
+      .eq("id", channelId);
+  }
+  return accessToken!;
+}
+
+/**
  * The real publish path, shared by the interactive "Publish now" action
  * (authenticated-user client) and the publish-due cron route
  * (service-role client, since a cron request has no user session).
@@ -24,6 +61,11 @@ export async function publishShort(
   if (!short) return { ok: false, error: "Short not found." };
   if (!short.file_path) return { ok: false, error: "This short has no uploaded file." };
 
+  // Checked here, before touching upload_runs/status at all, so a channel
+  // that was simply never connected doesn't count as a failed *upload*
+  // attempt against the retry budget below — same behavior as before this
+  // function started sharing its token-refresh logic with the calendar
+  // reschedule path via getValidAccessToken.
   const tokens = await getChannelTokens(supabase, short.channel_id);
   if (!tokens || !tokens.youtube_connected || !tokens.youtube_refresh_token) {
     return { ok: false, error: "This channel isn't connected to YouTube yet." };
@@ -32,23 +74,7 @@ export async function publishShort(
   await supabase.from("upload_runs").insert({ short_id: shortId, state: "uploading" });
 
   try {
-    let accessToken = tokens.youtube_access_token;
-    const expired =
-      !tokens.youtube_token_expires_at ||
-      new Date(tokens.youtube_token_expires_at).getTime() < Date.now() + 60_000;
-    if (!accessToken || expired) {
-      const refreshed = await refreshAccessToken(tokens.youtube_refresh_token);
-      accessToken = refreshed.access_token;
-      await supabase
-        .from("channels")
-        .update({
-          youtube_access_token: refreshed.access_token,
-          youtube_token_expires_at: new Date(
-            Date.now() + refreshed.expires_in * 1000
-          ).toISOString(),
-        })
-        .eq("id", short.channel_id);
-    }
+    const accessToken = await getValidAccessToken(supabase, short.channel_id);
 
     const { data: fileBlob, error: downloadErr } = await supabase.storage
       .from("shorts")
@@ -68,13 +94,16 @@ export async function publishShort(
     };
 
     const { videoId } = await uploadVideoToYoutube(
-      accessToken!,
+      accessToken,
       videoBytes,
       fileBlob.type || "video/mp4",
       metadata
     );
 
-    await supabase.from("shorts").update({ status: "live" }).eq("id", shortId);
+    await supabase
+      .from("shorts")
+      .update({ status: "live", youtube_video_id: videoId })
+      .eq("id", shortId);
     await supabase.from("upload_runs").insert({
       short_id: shortId,
       state: "live",

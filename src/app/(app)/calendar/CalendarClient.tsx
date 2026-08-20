@@ -1,9 +1,9 @@
 "use client";
 
 import { useMemo, useState, useTransition } from "react";
-import { ChevronLeftIcon, ChevronRightIcon, ZapIcon } from "@/components/icons";
+import { ChevronLeftIcon, ChevronRightIcon, PencilIcon, ZapIcon } from "@/components/icons";
 import type { Channel, Short } from "@/lib/database.types";
-import { formatDuration } from "@/lib/format";
+import { formatDuration, formatSlotFull } from "@/lib/format";
 import { setSlot } from "@/lib/actions";
 import { useRouter } from "next/navigation";
 
@@ -15,6 +15,37 @@ function isoAt(date: Date, hhmm: string) {
   const d = new Date(date.getFullYear(), date.getMonth(), date.getDate(), h, m, 0, 0);
   return d.toISOString();
 }
+
+function pad(n: number) {
+  return String(n).padStart(2, "0");
+}
+
+// datetime-local inputs want "YYYY-MM-DDTHH:mm" in the browser's local
+// time zone, which is also the zone every other date built in this file
+// (isoAt above) already uses — so this is a plain reformat, not a zone
+// conversion.
+function toDatetimeLocalValue(iso: string) {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function defaultEditValue(short: Short) {
+  if (short.slot_at) return toDatetimeLocalValue(short.slot_at);
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  d.setHours(18, 0, 0, 0);
+  return toDatetimeLocalValue(d.toISOString());
+}
+
+// A short that's already actually public on YouTube has no "scheduled
+// time" left to move — see setSlot in actions.ts, which enforces this
+// same rule server-side. This mirrors it client-side just to grey the
+// short out and explain why, before a doomed request round-trips.
+function isLocked(short: Short) {
+  return short.status === "live" && (!short.slot_at || new Date(short.slot_at) <= new Date());
+}
+
+type PendingMove = { short: Short; newSlotIso: string };
 
 export default function CalendarClient({
   shorts,
@@ -29,8 +60,13 @@ export default function CalendarClient({
     return new Date(d.getFullYear(), d.getMonth(), 1);
   });
   const [dragId, setDragId] = useState<string | null>(null);
+  const [editing, setEditing] = useState<{ short: Short; value: string } | null>(null);
+  const [confirming, setConfirming] = useState<PendingMove | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
+  const [isMoving, startMove] = useTransition();
   const channelById = useMemo(() => new Map(channels.map((c) => [c.id, c])), [channels]);
+  const shortById = useMemo(() => new Map(shorts.map((s) => [s.id, s])), [shorts]);
 
   const inbox = shorts.filter((s) => !s.slot_at);
   const today = new Date();
@@ -51,29 +87,70 @@ export default function CalendarClient({
     return out;
   }, [viewDate, shorts]);
 
-  function dropOn(date: Date, id: string | null) {
+  function stageDrop(date: Date, id: string | null) {
     const shortId = id ?? dragId;
+    setDragId(null);
     if (!shortId) return;
-    const existingCount = shorts.filter(
-      (s) => s.slot_at && new Date(s.slot_at).toDateString() === date.toDateString()
-    ).length;
-    const time = SLOT_TIMES[existingCount % SLOT_TIMES.length];
-    startTransition(async () => {
-      await setSlot(shortId, isoAt(date, time));
+    const short = shortById.get(shortId);
+    if (!short || isLocked(short)) return;
+
+    let hhmm: string;
+    if (short.slot_at) {
+      const d = new Date(short.slot_at);
+      hhmm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    } else {
+      const existingCount = shorts.filter(
+        (s) => s.slot_at && new Date(s.slot_at).toDateString() === date.toDateString()
+      ).length;
+      hhmm = SLOT_TIMES[existingCount % SLOT_TIMES.length];
+    }
+    const newSlotIso = isoAt(date, hhmm);
+    if (short.slot_at && new Date(short.slot_at).toDateString() === date.toDateString()) {
+      return; // dropped back on the day it's already on — nothing to confirm
+    }
+    setActionError(null);
+    setConfirming({ short, newSlotIso });
+  }
+
+  function openEditor(short: Short) {
+    if (isLocked(short)) return;
+    setActionError(null);
+    setEditing({ short, value: defaultEditValue(short) });
+  }
+
+  function continueFromEditor() {
+    if (!editing) return;
+    const newSlotIso = new Date(editing.value).toISOString();
+    setEditing(null);
+    setConfirming({ short: editing.short, newSlotIso });
+  }
+
+  function confirmMove() {
+    if (!confirming) return;
+    startMove(async () => {
+      const result = await setSlot(confirming.short.id, confirming.newSlotIso);
+      if (!result.ok) {
+        setActionError(result.error);
+        return;
+      }
+      setConfirming(null);
+      setActionError(null);
       router.refresh();
     });
-    setDragId(null);
   }
 
   function autoSlotInbox() {
     const days = [1, 2, 3, 5];
     startTransition(async () => {
+      const errors: string[] = [];
       for (let i = 0; i < inbox.length; i++) {
         const dayOffset = days[i % days.length] + Math.floor(i / days.length) * 7;
         const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() + dayOffset);
         const time = SLOT_TIMES[i % SLOT_TIMES.length];
-        await setSlot(inbox[i].id, isoAt(date, time));
+        const result = await setSlot(inbox[i].id, isoAt(date, time));
+        if (!result.ok) errors.push(`${inbox[i].title}: ${result.error}`);
       }
+      if (errors.length) setActionError(errors.join(" · "));
       router.refresh();
     });
   }
@@ -86,7 +163,9 @@ export default function CalendarClient({
             {viewDate.toLocaleDateString(undefined, { month: "long", year: "numeric" })}
           </h1>
           <p className="text-muted" style={{ margin: 0, fontSize: "13.5px" }}>
-            Drag a short from the inbox onto a day to give it a slot.
+            Drag a short onto a day to give it — or move it to — a slot, or
+            use the pencil for an exact time. Every move needs confirming
+            before it sticks.
           </p>
         </div>
         <div className="flex gap-2 items-center">
@@ -115,6 +194,10 @@ export default function CalendarClient({
           </button>
         </div>
       </div>
+
+      {actionError && !confirming && (
+        <div style={{ fontSize: 12.5, color: "var(--color-accent-700)" }}>{actionError}</div>
+      )}
 
       <div className="grid" style={{ gridTemplateColumns: "1fr 268px", gap: "var(--space-4)", alignItems: "start" }}>
         <div style={{ padding: "var(--space-3)", borderRadius: 26, background: "var(--color-surface)" }}>
@@ -145,10 +228,10 @@ export default function CalendarClient({
                   onDragOver={(e) => e.preventDefault()}
                   onDrop={(e) => {
                     e.preventDefault();
-                    dropOn(cell.date, null);
+                    stageDrop(cell.date, null);
                   }}
                   onClick={() => {
-                    if (inbox.length > 0) dropOn(cell.date, inbox[0].id);
+                    if (inbox.length > 0) stageDrop(cell.date, inbox[0].id);
                   }}
                   className="flex flex-col"
                   style={{
@@ -186,18 +269,17 @@ export default function CalendarClient({
                   </div>
                   {shown.map((s) => {
                     const ch = channelById.get(s.channel_id);
+                    const locked = isLocked(s);
                     const time = new Date(s.slot_at!).toLocaleTimeString(undefined, {
                       hour: "numeric",
                       minute: "2-digit",
                     });
                     return (
-                      <a
+                      <div
                         key={s.id}
-                        href={`/shorts/${s.id}`}
-                        onClick={(e) => e.stopPropagation()}
-                        className="flex items-center gap-1 truncate"
+                        className="flex items-center gap-1"
                         style={{
-                          padding: "3px 6px",
+                          padding: "3px 4px 3px 6px",
                           borderRadius: 999,
                           background:
                             s.status === "live"
@@ -205,15 +287,52 @@ export default function CalendarClient({
                               : s.status === "failed"
                               ? "var(--color-accent-200)"
                               : "var(--color-bg)",
-                          opacity: s.status === "draft" || s.status === "needs_review" ? 0.65 : 1,
-                          color: "inherit",
+                          opacity: locked ? 0.55 : s.status === "draft" || s.status === "needs_review" ? 0.65 : 1,
                         }}
+                        title={locked ? "Already public on YouTube — publish time can't be changed." : undefined}
                       >
-                        <span className="dot" style={{ width: 5, height: 5, flex: "none", background: ch?.dot ?? "var(--color-neutral-500)" }} />
-                        <span className="truncate" style={{ font: "700 9.5px/1.25 var(--font-body)" }}>
-                          {time} {s.title}
-                        </span>
-                      </a>
+                        <a
+                          href={`/shorts/${s.id}`}
+                          draggable={!locked}
+                          onDragStart={(e) => {
+                            if (locked) {
+                              e.preventDefault();
+                              return;
+                            }
+                            setDragId(s.id);
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          className="flex items-center gap-1 truncate"
+                          style={{ color: "inherit", minWidth: 0, cursor: locked ? "default" : "grab" }}
+                        >
+                          <span className="dot" style={{ width: 5, height: 5, flex: "none", background: ch?.dot ?? "var(--color-neutral-500)" }} />
+                          <span className="truncate" style={{ font: "700 9.5px/1.25 var(--font-body)" }}>
+                            {time} {s.title}
+                          </span>
+                        </a>
+                        {!locked && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openEditor(s);
+                            }}
+                            className="btn btn-icon"
+                            title="Set an exact date & time"
+                            style={{
+                              flex: "none",
+                              width: 15,
+                              height: 15,
+                              minHeight: 0,
+                              padding: 0,
+                              border: 0,
+                              background: "transparent",
+                              color: "color-mix(in srgb, var(--color-text) 45%, transparent)",
+                            }}
+                          >
+                            <PencilIcon size={9} />
+                          </button>
+                        )}
+                      </div>
                     );
                   })}
                   {more > 0 && (
@@ -236,8 +355,9 @@ export default function CalendarClient({
             <span style={{ fontSize: 11, color: "var(--color-accent-800)", opacity: 0.7 }}>{inbox.length} waiting</span>
           </div>
           <div style={{ fontSize: "11.5px", lineHeight: 1.45, color: "var(--color-accent-800)", opacity: 0.8 }}>
-            Freshly imported, no slot yet. Drag one onto a day, click a day to
-            drop the next one in, or auto-slot the batch.
+            Freshly imported or approved, no slot yet. Drag one onto a day,
+            click a day to drop the next one in, use the pencil for an
+            exact time, or auto-slot the batch.
           </div>
           <div className="flex flex-col gap-2">
             {inbox.map((s) => {
@@ -261,13 +381,21 @@ export default function CalendarClient({
                       <path d="M8 5l11 7-11 7z" />
                     </svg>
                   </div>
-                  <div className="flex flex-col min-w-0" style={{ gap: 2 }}>
+                  <div className="flex flex-col min-w-0 flex-1" style={{ gap: 2 }}>
                     <span style={{ font: "700 12px/1.25 var(--font-body)" }}>{s.title}</span>
                     <span className="flex items-center gap-1" style={{ fontSize: "10.5px", color: "color-mix(in srgb, var(--color-text) 50%, transparent)" }}>
                       <span className="dot" style={{ width: 6, height: 6, background: ch?.dot ?? "var(--color-neutral-500)" }} />
                       {ch?.name} · {formatDuration(s.duration_seconds)}
                     </span>
                   </div>
+                  <button
+                    onClick={() => openEditor(s)}
+                    className="btn btn-icon btn-ghost"
+                    title="Set an exact date & time"
+                    style={{ flex: "none", width: 22, height: 22, minHeight: 0, padding: 0 }}
+                  >
+                    <PencilIcon size={11} />
+                  </button>
                 </div>
               );
             })}
@@ -292,6 +420,107 @@ export default function CalendarClient({
           </div>
         </div>
       </div>
+
+      {editing && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "color-mix(in srgb, var(--color-neutral-900) 45%, transparent)",
+            display: "grid",
+            placeItems: "center",
+            zIndex: 50,
+          }}
+          onClick={() => setEditing(null)}
+        >
+          <div
+            className="card elev-sm flex flex-col gap-3"
+            style={{ width: 320, background: "var(--color-surface)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="card-kicker">Set exact time</div>
+            <div style={{ font: "700 13.5px/1.35 var(--font-body)" }}>{editing.short.title}</div>
+            <input
+              type="datetime-local"
+              className="input"
+              value={editing.value}
+              onChange={(e) => setEditing({ short: editing.short, value: e.target.value })}
+            />
+            <div className="flex gap-2" style={{ justifyContent: "flex-end" }}>
+              <button className="btn btn-ghost" onClick={() => setEditing(null)}>
+                Cancel
+              </button>
+              <button className="btn btn-primary" onClick={continueFromEditor} disabled={!editing.value}>
+                Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirming && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "color-mix(in srgb, var(--color-neutral-900) 45%, transparent)",
+            display: "grid",
+            placeItems: "center",
+            zIndex: 50,
+          }}
+          onClick={() => {
+            if (isMoving) return;
+            setConfirming(null);
+            setActionError(null);
+          }}
+        >
+          <div
+            className="card elev-sm flex flex-col gap-3"
+            style={{ width: 360, background: "var(--color-surface)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="card-kicker">Confirm move</div>
+            <div style={{ fontSize: 13.5, lineHeight: 1.5 }}>
+              {confirming.short.slot_at ? (
+                <>
+                  Move <strong>{confirming.short.title}</strong> from{" "}
+                  {formatSlotFull(confirming.short.slot_at)} to{" "}
+                  <strong>{formatSlotFull(confirming.newSlotIso)}</strong>?
+                </>
+              ) : (
+                <>
+                  Schedule <strong>{confirming.short.title}</strong> for{" "}
+                  <strong>{formatSlotFull(confirming.newSlotIso)}</strong>?
+                </>
+              )}
+            </div>
+            {confirming.short.status === "live" && (
+              <div style={{ fontSize: 11.5, lineHeight: 1.5, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+                This short is already uploaded and privately scheduled on
+                YouTube — its publish time there will be updated to match.
+              </div>
+            )}
+            {actionError && (
+              <div style={{ fontSize: 12, color: "var(--color-accent-700)" }}>{actionError}</div>
+            )}
+            <div className="flex gap-2" style={{ justifyContent: "flex-end" }}>
+              <button
+                className="btn btn-ghost"
+                onClick={() => {
+                  setConfirming(null);
+                  setActionError(null);
+                }}
+                disabled={isMoving}
+              >
+                Cancel
+              </button>
+              <button className="btn btn-primary" onClick={confirmMove} disabled={isMoving}>
+                {isMoving ? "Moving…" : "Confirm"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
