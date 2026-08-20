@@ -66,13 +66,14 @@ export function formatSlotFull(slotAt: string | null): string {
 }
 
 export function metadataLabel(source: string): string {
+  if (source === "ai_video") return "AI drafted (watched video)";
   if (source === "ai") return "AI drafted";
   if (source === "edited") return "You edited";
   return "Empty";
 }
 
 export function metadataTagClass(source: string): string {
-  if (source === "ai") return "tag tag-accent-2";
+  if (source === "ai_video" || source === "ai") return "tag tag-accent-2";
   if (source === "edited") return "tag tag-neutral";
   return "tag tag-outline";
 }

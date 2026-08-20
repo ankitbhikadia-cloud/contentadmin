@@ -174,6 +174,13 @@ export default function ImportClient({
               />
               Draft titles, descriptions & tags with AI on import
             </label>
+            {aiDraft && (
+              <span className="text-muted" style={{ fontSize: 11, marginTop: -6, marginLeft: 22 }}>
+                Fast text-only drafts from filename/channel context across the whole batch — not
+                the video itself. Open an individual short afterward and use its own &quot;Draft
+                with AI&quot; for a video-aware draft.
+              </span>
+            )}
 
             <label className="flex items-center gap-2" style={{ fontSize: 12.5, cursor: "pointer" }}>
               <input

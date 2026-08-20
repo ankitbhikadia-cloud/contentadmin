@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { draftShortMetadata } from "@/lib/ai";
+import { draftMetadataFromVideo } from "@/lib/gemini";
 import { publishShort, type PublishResult } from "@/lib/publish";
 import { getDueShorts } from "@/lib/data";
 
@@ -149,9 +150,15 @@ export async function createShortsFromImport(
 
   if (settings.aiDraft && inserted) {
     // Cap to keep this within one request's time budget — matches the
-    // bulk "Generate metadata" cap on the Queue page.
+    // bulk "Generate metadata" cap on the Queue page. preferVideo: false
+    // for the same reason as bulkDraftMetadata — this loop runs
+    // sequentially inside the single request the Import page's "Upload &
+    // send to queue" click makes, and the video-aware path's per-item
+    // upload+process+generate round trip would make 10 of them here
+    // take minutes, not seconds. Revisit an individual short's detail
+    // page for a real video-aware draft.
     for (const row of inserted.slice(0, 10)) {
-      await draftMetadata(row.id);
+      await draftMetadata(row.id, { preferVideo: false });
     }
   }
 }
@@ -314,10 +321,26 @@ export async function signOut() {
 
 export type DraftResult = { ok: true } | { ok: false; error: string };
 
-// Real Claude API call — see src/lib/ai.ts for exactly what signals it
-// drafts from (title/description/filename/channel context, not the
-// video itself).
-export async function draftMetadata(shortId: string): Promise<DraftResult> {
+// Video-aware when it can be: if GEMINI_API_KEY is set and the short has
+// an uploaded file, downloads it from Storage and drafts from the actual
+// video via src/lib/gemini.ts. Otherwise (no key configured, or no file
+// yet) falls back to the text-only Claude path in src/lib/ai.ts. This
+// fallback is only for "not configured" — a configured-but-failing
+// Gemini call surfaces its real error rather than silently degrading to
+// the text-only path, so a quota/processing failure doesn't masquerade
+// as a worse-but-successful draft.
+//
+// opts.preferVideo defaults to true for the single-short "Draft with AI"
+// button. bulkDraftMetadata (Queue's "Generate metadata", up to 10 items
+// sequentially in one server-action call) explicitly passes false —
+// video drafting's upload+processing+generate round trip is far slower
+// per item than the text-only path, and doing that 10x sequentially
+// risks blowing the 300s function budget.
+export async function draftMetadata(
+  shortId: string,
+  opts?: { preferVideo?: boolean }
+): Promise<DraftResult> {
+  const preferVideo = opts?.preferVideo ?? true;
   const supabase = await createClient();
   const { data: short, error: shortErr } = await supabase
     .from("shorts")
@@ -334,14 +357,37 @@ export async function draftMetadata(shortId: string): Promise<DraftResult> {
     .maybeSingle();
 
   try {
-    const drafted = await draftShortMetadata({
-      currentTitle: short.title,
-      currentDescription: short.description,
-      fileName: short.file_name,
-      channelName: channel?.name ?? "this channel",
-      channelCadence: channel?.cadence ?? null,
-      existingTags: short.tags ?? [],
-    });
+    const useVideo = preferVideo && !!short.file_path && !!process.env.GEMINI_API_KEY;
+
+    const drafted = useVideo
+      ? await (async () => {
+          const { data: fileBlob, error: downloadErr } = await supabase.storage
+            .from("shorts")
+            .download(short.file_path!);
+          if (downloadErr || !fileBlob) {
+            throw new Error(
+              downloadErr?.message ?? "Couldn't download the video file from Storage."
+            );
+          }
+          return draftMetadataFromVideo({
+            videoBytes: await fileBlob.arrayBuffer(),
+            mimeType: fileBlob.type || "video/mp4",
+            fileDisplayName: short.file_name ?? "short.mp4",
+            currentTitle: short.title,
+            currentDescription: short.description,
+            channelName: channel?.name ?? "this channel",
+            channelCadence: channel?.cadence ?? null,
+            existingTags: short.tags ?? [],
+          });
+        })()
+      : await draftShortMetadata({
+          currentTitle: short.title,
+          currentDescription: short.description,
+          fileName: short.file_name,
+          channelName: channel?.name ?? "this channel",
+          channelCadence: channel?.cadence ?? null,
+          existingTags: short.tags ?? [],
+        });
 
     const { error: updateErr } = await supabase
       .from("shorts")
@@ -351,7 +397,7 @@ export async function draftMetadata(shortId: string): Promise<DraftResult> {
         tags: drafted.tags,
         trend_score: drafted.trendScore,
         trend_note: drafted.trendNote,
-        metadata_source: "ai",
+        metadata_source: useVideo ? "ai_video" : "ai",
       })
       .eq("id", shortId);
     if (updateErr) return { ok: false, error: updateErr.message };
@@ -369,6 +415,11 @@ export async function draftMetadata(shortId: string): Promise<DraftResult> {
     revalidatePath("/dashboard");
     return { ok: true };
   } catch (err) {
+    // Log server-side — this was previously swallowed entirely (caught
+    // here, only ever surfaced as a one-line message in the UI), which
+    // made a real Claude API response-shape bug invisible in Vercel's
+    // logs while debugging it.
+    console.error(`draftMetadata(${shortId}) failed:`, err);
     return { ok: false, error: err instanceof Error ? err.message : "AI drafting failed." };
   }
 }
@@ -377,7 +428,11 @@ export async function draftMetadata(shortId: string): Promise<DraftResult> {
 // sequentially (not in parallel) to stay within Claude API rate limits
 // and keep this within one server-action invocation's time budget — capped
 // at 10 shorts per call for that reason; select fewer at a time for larger
-// batches.
+// batches. Deliberately stays on the fast text-only path (preferVideo:
+// false) rather than the video-aware one — 10 sequential Gemini
+// upload+process+generate round trips would risk the 300s function
+// budget. Use "Draft with AI" on a short's own detail page for the real
+// video-aware draft.
 export async function bulkDraftMetadata(
   ids: string[]
 ): Promise<{ succeeded: number; failed: { id: string; error: string }[] }> {
@@ -385,7 +440,7 @@ export async function bulkDraftMetadata(
   const failed: { id: string; error: string }[] = [];
   let succeeded = 0;
   for (const id of capped) {
-    const result = await draftMetadata(id);
+    const result = await draftMetadata(id, { preferVideo: false });
     if (result.ok) succeeded++;
     else failed.push({ id, error: result.error });
   }

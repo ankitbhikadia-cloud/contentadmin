@@ -82,14 +82,34 @@ list.
 
 ## AI-drafted metadata
 
-"Draft with AI" (on a short's detail page), the Queue's bulk "Generate
-metadata," and Import's "Draft titles… on import" toggle all call the
-real Claude API (`src/lib/ai.ts`) with the text signals actually
-available — current title/description, original filename, channel name
-and cadence. It returns a title, description, tags, 2–3 alt-title
-options, and a 0–100 trend score with a one-line note (an AI estimate of
-hook/SEO strength from those signals — it doesn't watch the video).
-Requires `ANTHROPIC_API_KEY`.
+Two real paths, both returning a title, description, tags, 2–3
+alt-title options, and a 0–100 trend score with a one-line note:
+
+- **Video-aware (single short only).** A short's own detail page →
+  "Draft with AI" uploads the actual video file from Storage to the
+  Gemini File API (`src/lib/gemini.ts`), waits for it to finish
+  processing, then asks Gemini to draft from what's really shown and
+  said in the clip — not just its metadata. Requires `GEMINI_API_KEY`.
+  Saved shorts get `metadata_source: "ai_video"` so the Queue/Dashboard
+  can distinguish a real video-watched draft from a text-only one. Takes
+  up to a minute or two (upload + processing + generation), which is why
+  this path is single-short only.
+- **Text-only (fallback + every bulk path).** The Queue's bulk "Generate
+  metadata," Import's "Draft titles… on import" toggle, and a short's own
+  "Draft with AI" when `GEMINI_API_KEY` isn't set all call the Claude API
+  (`src/lib/ai.ts`) with the text signals actually available — current
+  title/description, original filename, channel name and cadence. Fast
+  enough to run across a whole batch, but it's estimating from context,
+  not watching the video. Requires `ANTHROPIC_API_KEY`.
+
+The single-short button always prefers video when `GEMINI_API_KEY` is
+configured and the short has a video file; bulk paths (Queue, Import)
+always use text-only on purpose, even when Gemini is configured, since
+running 10+ video uploads sequentially in one request would blow past
+reasonable response times. If Gemini is configured but a draft call
+itself fails (bad key, quota, processing error), that error surfaces for
+real — it does not silently fall back to Claude, so a broken Gemini
+setup is visible rather than quietly degrading.
 
 ## Real YouTube publishing
 
@@ -137,7 +157,11 @@ list with descriptions:
 - `NEXT_PUBLIC_SITE_URL` — the deployed URL, used for the magic-link
   redirect and the YouTube OAuth `redirect_uri`
 - `SUPABASE_SERVICE_ROLE_KEY` — for the publish-due cron job
-- `ANTHROPIC_API_KEY` (and optionally `ANTHROPIC_MODEL`) — for AI drafting
+- `ANTHROPIC_API_KEY` (and optionally `ANTHROPIC_MODEL`) — for text-only
+  AI drafting (bulk paths + fallback)
+- `GEMINI_API_KEY` (and optionally `GEMINI_MODEL`) — for video-aware
+  "Draft with AI" on a short's detail page; without it that button still
+  works but drafts from text context only, same as the bulk paths
 - `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` — for YouTube OAuth
 - `CRON_SECRET` (optional but recommended) — protects
   `/api/cron/publish-due` from unauthenticated triggers

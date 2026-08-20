@@ -1,13 +1,15 @@
-// Real AI metadata drafting via the Claude API. No SDK dependency — a
-// direct fetch keeps this build's dependency surface (and risk) small.
+// Text-only AI metadata drafting via the Claude API. No SDK dependency —
+// a direct fetch keeps this build's dependency surface (and risk) small.
 //
-// Honest scope note: this drafts from the text signals we actually have
-// (current title/filename, any description already typed, the channel's
-// name/cadence) — it does not watch the video or transcribe audio, which
-// would need a separate media pipeline (ffmpeg + a transcription service)
-// that isn't built. Metadata quality depends on how much real context you
-// give it before drafting — a one-line note in the title/description
-// before hitting "Draft with AI" goes a long way.
+// This is the fallback path: it drafts from text signals only (current
+// title/filename, any description already typed, the channel's
+// name/cadence) — it does not watch the video. src/lib/actions.ts's
+// draftMetadata() prefers the real video-aware path in src/lib/gemini.ts
+// when GEMINI_API_KEY is configured and the short has an uploaded file;
+// this runs only when that isn't available, so drafting still works
+// without a second API key set up. Metadata quality on this path depends
+// on how much real context you give it before drafting — a one-line note
+// in the title/description before hitting "Draft with AI" goes a long way.
 
 export type DraftedMetadata = {
   title: string;
@@ -17,6 +19,39 @@ export type DraftedMetadata = {
   trendScore: number;
   trendNote: string;
 };
+
+// Shared by both AI providers (this file's Claude/text-only path, and
+// src/lib/gemini.ts's video-aware path) so the JSON validation/clamping
+// rules — and any future fix to them — stay in exactly one place.
+export function parseDraftedMetadataJson(rawText: string): DraftedMetadata {
+  let parsed: unknown;
+  try {
+    // Strip accidental markdown fences just in case the model adds them.
+    const cleaned = rawText.trim().replace(/^```json\s*|```$/g, "");
+    parsed = JSON.parse(cleaned);
+  } catch {
+    throw new Error("AI response wasn't valid JSON.");
+  }
+
+  const p = parsed as Partial<DraftedMetadata>;
+  if (typeof p.title !== "string" || typeof p.description !== "string") {
+    throw new Error("AI response was missing required fields.");
+  }
+
+  return {
+    title: p.title.slice(0, 100),
+    description: p.description,
+    tags: Array.isArray(p.tags) ? p.tags.slice(0, 15).map(String) : [],
+    altTitles: Array.isArray(p.altTitles)
+      ? p.altTitles.slice(0, 3).map(String)
+      : [],
+    trendScore:
+      typeof p.trendScore === "number"
+        ? Math.max(0, Math.min(100, Math.round(p.trendScore)))
+        : 50,
+    trendNote: typeof p.trendNote === "string" ? p.trendNote : "",
+  };
+}
 
 const MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-5";
 
@@ -83,34 +118,19 @@ this exact shape:
   }
 
   const json = await res.json();
-  const text: string | undefined = json?.content?.[0]?.text;
-  if (!text) throw new Error("Claude API returned no content.");
-
-  let parsed: unknown;
-  try {
-    // Strip accidental markdown fences just in case the model adds them.
-    const cleaned = text.trim().replace(/^```json\s*|```$/g, "");
-    parsed = JSON.parse(cleaned);
-  } catch {
-    throw new Error("Claude API response wasn't valid JSON.");
+  // Don't assume content[0] is the text block — a response can lead with
+  // a non-text block (e.g. thinking) depending on the model, so scan for
+  // the first real text block instead of indexing blindly.
+  const blocks: Array<{ type?: string; text?: string }> = Array.isArray(json?.content)
+    ? json.content
+    : [];
+  const text = blocks.find((b) => b?.type === "text" && typeof b.text === "string")?.text;
+  if (!text) {
+    const blockTypes = blocks.map((b) => b?.type ?? "unknown").join(", ") || "none";
+    throw new Error(
+      `Claude API returned no text content (stop_reason: ${json?.stop_reason ?? "unknown"}, blocks: [${blockTypes}]).`
+    );
   }
 
-  const p = parsed as Partial<DraftedMetadata>;
-  if (typeof p.title !== "string" || typeof p.description !== "string") {
-    throw new Error("Claude API response was missing required fields.");
-  }
-
-  return {
-    title: p.title.slice(0, 100),
-    description: p.description,
-    tags: Array.isArray(p.tags) ? p.tags.slice(0, 15).map(String) : [],
-    altTitles: Array.isArray(p.altTitles)
-      ? p.altTitles.slice(0, 3).map(String)
-      : [],
-    trendScore:
-      typeof p.trendScore === "number"
-        ? Math.max(0, Math.min(100, Math.round(p.trendScore)))
-        : 50,
-    trendNote: typeof p.trendNote === "string" ? p.trendNote : "",
-  };
+  return parseDraftedMetadataJson(text);
 }

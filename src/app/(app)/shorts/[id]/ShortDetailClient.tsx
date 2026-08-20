@@ -26,14 +26,17 @@ export default function ShortDetailClient({
   reviews,
   altTitles,
   currentUserEmail,
+  videoAiConfigured,
 }: {
   short: Short;
   channel: Channel | null;
   reviews: Review[];
   altTitles: ShortAltTitle[];
   currentUserEmail: string;
+  videoAiConfigured: boolean;
 }) {
   const router = useRouter();
+  const willWatchVideo = videoAiConfigured && !!short.file_path;
   const [title, setTitle] = useState(short.title);
   const [description, setDescription] = useState(short.description);
   const [tags, setTags] = useState<string[]>(short.tags ?? []);
@@ -214,8 +217,8 @@ export default function ShortDetailClient({
             ) : (
               <div style={{ fontSize: "11.5px", lineHeight: 1.5, color: "color-mix(in srgb, var(--color-text) 62%, transparent)" }}>
                 Not scored yet — click &quot;Draft with AI&quot; to get a
-                real, AI-estimated hook/SEO score for the current title and
-                description.
+                real, AI-estimated hook/SEO score{" "}
+                {willWatchVideo ? "from the actual video" : "from the current title and description"}.
               </div>
             )}
           </div>
@@ -263,8 +266,19 @@ export default function ShortDetailClient({
                 onClick={draftWithAi}
                 disabled={isDrafting}
                 className="btn btn-secondary"
+                title={
+                  willWatchVideo
+                    ? "Uploads the video to Gemini and drafts from what's actually shown and said — can take up to a minute or two."
+                    : videoAiConfigured
+                    ? "No video file on this short yet — drafting from title/description/channel context only."
+                    : "GEMINI_API_KEY isn't configured — drafting from title/description/channel context only, not the video."
+                }
               >
-                {isDrafting ? "Drafting…" : "Draft with AI"}
+                {isDrafting
+                  ? willWatchVideo
+                    ? "Watching video…"
+                    : "Drafting…"
+                  : "Draft with AI"}
               </button>
               <button onClick={approve} disabled={isApproving || short.status === "approved"} className="btn btn-primary">
                 {short.status === "approved" ? "Approved ✓" : isApproving ? "Approving…" : "Approve for upload"}
@@ -273,6 +287,13 @@ export default function ShortDetailClient({
           </div>
           {draftError && (
             <div style={{ fontSize: 12, color: "var(--color-accent-700)" }}>{draftError}</div>
+          )}
+          {!willWatchVideo && (
+            <div style={{ fontSize: 11.5, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+              {videoAiConfigured
+                ? "This short has no uploaded video file, so \"Draft with AI\" will draft from text signals only."
+                : "\"Draft with AI\" currently drafts from title/description/channel context only — it isn't watching the video. Add GEMINI_API_KEY to enable real video analysis."}
+            </div>
           )}
 
           <div className="flex flex-col gap-3" style={{ padding: "var(--space-4)", borderRadius: 26, background: "var(--color-surface)" }}>

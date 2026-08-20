@@ -37,6 +37,7 @@ export default async function ShortDetailPage({
       reviews={reviews}
       altTitles={altTitles}
       currentUserEmail={user?.email ?? "you"}
+      videoAiConfigured={!!process.env.GEMINI_API_KEY}
     />
   );
 }

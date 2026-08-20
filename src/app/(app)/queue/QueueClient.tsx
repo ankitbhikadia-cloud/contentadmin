@@ -149,6 +149,7 @@ export default function QueueClient({
               disabled={isDrafting}
               className="btn btn-secondary"
               style={{ fontSize: 12, padding: "6px 12px", borderColor: "var(--color-accent-600)", color: "var(--color-accent-900)" }}
+              title="Drafts from title/description/channel context for speed across a batch — not the video itself. Open an individual short and use its own \"Draft with AI\" for a real video-aware draft."
             >
               {isDrafting ? "Drafting…" : "Generate metadata"}
             </button>

@@ -41,7 +41,9 @@ export default async function DashboardPage() {
     return channelIds.map((id) => channelById.get(id)?.dot ?? "var(--color-neutral-500)");
   });
 
-  const aiDrafted = shorts.filter((s) => s.metadata_source === "ai").length;
+  const aiDrafted = shorts.filter(
+    (s) => s.metadata_source === "ai" || s.metadata_source === "ai_video"
+  ).length;
 
   return (
     <div className="page" style={{ maxWidth: 1240 }}>
