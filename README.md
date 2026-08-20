@@ -65,17 +65,24 @@ That flow, the token refresh, and the actual upload
 
 - **Manual publish**: a short's detail page gets a real "Publish now"
   button once its channel is connected.
-- **Auto-uploader**: `/api/cron/publish-due` runs on Vercel Cron every 15
-  minutes (see `vercel.json`), publishing any `scheduled` short whose
-  slot has passed, using a service-role Supabase client
+- **Auto-uploader**: `/api/cron/publish-due` runs on Vercel Cron once a
+  day at 16:05 UTC (see `vercel.json`), publishing any `scheduled` short
+  whose slot has passed, using a service-role Supabase client
   (`src/lib/supabase/service.ts`) since a cron request has no user
-  session. The Auto-uploader page also has a "Check now" button that
-  runs the same logic on demand.
+  session. Once a day, not more often, because **Vercel's Hobby plan
+  caps cron jobs to daily** — `deploy_to_vercel` rejected this project
+  outright with `cron_jobs_limits_reached` when the schedule was every
+  15 minutes; upgrading to Pro would allow a tighter cadence. The
+  Auto-uploader page also has a "Check now" button that runs the same
+  logic on demand, for whenever once a day isn't fast enough.
 - **Retries**: up to 3 attempts total per short (tracked via
-  `upload_runs`, not a precise timer — retries happen on the cron's own
-  15-minute cadence). After the 3rd failure the short flips to `failed`
-  and its slot moves an hour out; re-publishing from there is a manual
-  "Publish now," not automatic re-pickup.
+  `upload_runs`, counted over a rolling 96-hour window so 3 once-daily
+  cron attempts are still visible to the exhaustion check — see the
+  comment in `src/lib/publish.ts`). After the 3rd failure the short
+  flips to `failed` and its slot moves an hour out; re-publishing from
+  there is a manual "Publish now," not automatic re-pickup. Manual
+  "Publish now"/"Check now" clicks count toward the same 3 attempts, so
+  retrying by hand gets you there faster than waiting on the daily cron.
 - Requires a Google Cloud OAuth client (YouTube Data API v3 enabled,
   OAuth consent screen with the `youtube.upload` and `youtube.force-ssl`
   scopes, redirect URI `{NEXT_PUBLIC_SITE_URL}/auth/youtube/callback`).
@@ -99,8 +106,10 @@ list with descriptions:
 - `CRON_SECRET` (optional but recommended) — protects
   `/api/cron/publish-due` from unauthenticated triggers
 
-**Plan constraints to check before relying on this in production:** Vercel
-Cron's minimum interval and the `maxDuration = 300` set on the upload
-routes (shorts detail, queue, auto-uploader, the cron route itself) may
-both need a paid Vercel plan — the Hobby plan historically caps both cron
-frequency and function duration below what's configured here.
+**Plan constraint, confirmed:** Vercel's Hobby plan rejects any cron
+schedule that runs more than once a day (`vercel.json` is set to daily
+for that reason — see "Auto-uploader" above). `maxDuration = 300` on the
+upload routes (shorts detail, queue, auto-uploader, the cron route
+itself) hasn't hit a similar rejection yet, but the Hobby plan
+historically caps function duration too — worth checking if a real
+upload ever times out.

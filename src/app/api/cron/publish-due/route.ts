@@ -2,9 +2,13 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createServiceClient } from "@/lib/supabase/service";
 import { publishShort } from "@/lib/publish";
 
-// Runs on Vercel Cron (see vercel.json) every 15 minutes, publishing any
-// scheduled short whose slot_at has passed on a connected channel. Uses
-// the service-role client (see src/lib/supabase/service.ts) since a cron
+// Runs on Vercel Cron (see vercel.json) once a day, publishing any
+// scheduled short whose slot_at has passed on a connected channel. Once
+// a day, not more often, because Vercel's Hobby plan caps cron jobs to
+// daily — a tighter cadence needs the Pro plan (see the schedule
+// comment in vercel.json). Between cron runs, the "Check now" button on
+// the Auto-uploader page runs this same logic on demand. Uses the
+// service-role client (see src/lib/supabase/service.ts) since a cron
 // request has no user session, so the normal cookie-based/RLS-scoped
 // client would see nothing.
 //

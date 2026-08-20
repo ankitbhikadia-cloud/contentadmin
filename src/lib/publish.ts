@@ -90,24 +90,34 @@ export async function publishShort(
 }
 
 const MAX_ATTEMPTS = 3; // initial attempt + 2 retries
-const RETRY_WINDOW_HOURS = 1;
+
+// How far back to look when counting a short's recent failures. This has
+// to be wider than the gap between automatic retries, or the exhaustion
+// check below would never see more than one attempt at a time and a
+// broken short would just retry forever. The cron (see vercel.json) runs
+// once a day on the Hobby plan (Vercel caps Hobby cron to daily — a
+// 15-minute cadence needs the Pro plan), so 3 daily attempts span up to
+// ~48 hours; 96 hours gives that a comfortable buffer. Manual "Publish
+// now" / "Check now" clicks use this same window, so repeated manual
+// retries within those 4 days count toward exhaustion too — that's
+// intentional, not a leftover from a faster cadence.
+const RETRY_LOOKBACK_HOURS = 96;
+const HOLD_HOURS = 1; // how far to push slot_at out once a short is marked failed
 
 /**
- * Real retry policy: up to 3 attempts total (the cron job's own 15-minute
- * cadence provides the "spaced out" retries). Once the 3rd attempt in the
- * last hour fails, the short is marked failed and its slot is pushed
- * forward an hour so it naturally becomes eligible again later, matching
- * the "two retries, then hold the slot an hour" behavior from the design
- * — implemented via attempt-counting against upload_runs rather than a
- * precise 10-minutes-apart timer, since publishing only runs on the
- * cron's own schedule.
+ * Real retry policy: up to 3 attempts total. Once the 3rd attempt within
+ * the lookback window fails, the short is marked failed and its slot is
+ * pushed forward an hour so it stops visually sitting on its original
+ * (missed) slot on the calendar — implemented via attempt-counting
+ * against upload_runs rather than a precise timer, since automatic
+ * publishing only runs on the cron's own schedule.
  */
 async function recordFailureAndMaybeHold(
   supabase: SupabaseLike,
   shortId: string,
   message: string
 ) {
-  const since = new Date(Date.now() - RETRY_WINDOW_HOURS * 60 * 60 * 1000).toISOString();
+  const since = new Date(Date.now() - RETRY_LOOKBACK_HOURS * 60 * 60 * 1000).toISOString();
   const { count } = await supabase
     .from("upload_runs")
     .select("*", { count: "exact", head: true })
@@ -125,7 +135,7 @@ async function recordFailureAndMaybeHold(
   });
 
   if (exhausted) {
-    const heldUntil = new Date(Date.now() + RETRY_WINDOW_HOURS * 60 * 60 * 1000).toISOString();
+    const heldUntil = new Date(Date.now() + HOLD_HOURS * 60 * 60 * 1000).toISOString();
     await supabase
       .from("shorts")
       .update({ status: "failed", slot_at: heldUntil })

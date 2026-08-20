@@ -44,9 +44,11 @@ export default async function AutoUploaderPage() {
           {connectedCount > 0 ? "Live" : "Not set up"}
         </span>
         <span className="text-muted" style={{ fontSize: "12.5px" }}>
-          A background job checks every 15 minutes for approved shorts past
-          their slot time on connected channels and publishes them
-          automatically. You can also trigger a check right now:
+          A background job checks once a day (16:05 UTC — Vercel's Hobby
+          plan caps cron jobs to daily) for approved shorts past their
+          slot time on connected channels and publishes them
+          automatically. Don&apos;t want to wait for that? Trigger a
+          check right now:
         </span>
         <PublishDueButton />
       </div>
@@ -116,12 +118,14 @@ export default async function AutoUploaderPage() {
           When something breaks
         </div>
         <div style={{ fontSize: "12.5px", lineHeight: 1.55, color: "var(--color-accent-900)", opacity: 0.85, maxWidth: "66ch" }}>
-          Two automatic retries (the cron job's own 15-minute cadence
-          spaces them out). If it still fails on the third attempt, you get
-          the real error from YouTube in this log, the short flips to
-          "failed" in the Queue, and its slot moves an hour out so it stops
-          blocking that calendar slot — publishing it again from there is a
-          manual "Publish now" on its detail page, not automatic.
+          Two automatic retries — spaced out by whatever actually triggers
+          a check (the daily cron, or you clicking "Check now" /
+          "Publish now" sooner). If it still fails on the third attempt
+          within about 4 days, you get the real error from YouTube in this
+          log, the short flips to "failed" in the Queue, and its slot moves
+          an hour out so it stops sitting on that calendar slot —
+          publishing it again from there is a manual "Publish now" on its
+          detail page, not automatic.
         </div>
       </div>
     </div>

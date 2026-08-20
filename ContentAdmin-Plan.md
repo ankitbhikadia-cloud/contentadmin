@@ -253,7 +253,35 @@ Deployment section for the full list): `SUPABASE_SERVICE_ROLE_KEY`,
 is in "Testing" mode, which caps YouTube uploads from it to private
 regardless of the `visibility` setting on a short — Google's
 verification review needs to complete before public/scheduled uploads
-actually go out as configured. Also unverified: whether the Vercel plan
-this project is on supports the cron frequency (`*/15 * * * *`) and
-`maxDuration = 300` configured here — both are historically Hobby-plan
-restricted.
+actually go out as configured.
+
+## Status (2026-08-20, later still again) — deploy was silently blocked by the cron limit
+
+After pushing the "make everything real" round above, the deployment
+never actually landed — Vercel kept rebuilding the *old* pre-YouTube
+commit every time you clicked Redeploy, and no new deployment ever
+appeared for the new commits at all, not even as a failed one in the
+list. Root cause, found by trying `create_git_project` directly: your
+Vercel account is on the **Hobby plan, which rejects any cron schedule
+that runs more than once a day** — `vercel.json`'s `*/15 * * * *` was
+being rejected at deployment-creation time with
+`cron_jobs_limits_reached`, before a deployment object even existed to
+show up as an error.
+
+You picked "drop to once-daily cron" over upgrading to Pro or dropping
+automatic publishing entirely. Changed `vercel.json` to `5 16 * * *`
+(16:05 UTC daily — 5 minutes after the fixed 16:00 UTC slot time Import
+uses for spread-days scheduling, so same-day scheduled shorts get
+picked up promptly). Also widened the retry-exhaustion lookback window
+in `src/lib/publish.ts` from 1 hour to 96 hours — with a daily cron, a
+1-hour window would never see more than one attempt at a time, so a
+broken short would just retry forever instead of ever reaching "3
+attempts, then hold." Manual "Publish now"/"Check now" clicks still
+count toward the same 3-attempt limit, so retrying by hand is still the
+fast path. Auto-uploader page copy, the cron route's comments, and the
+README were all updated to describe the daily cadence accurately rather
+than the originally-planned 15-minute one.
+
+If you want the tighter cadence back later, upgrading the Vercel team to
+Pro and reverting `vercel.json`'s schedule to `*/15 * * * *` is the
+whole change.
