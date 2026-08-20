@@ -3,11 +3,13 @@
 import { useState, useTransition } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { Channel } from "@/lib/database.types";
+import type { ChannelMemberInfo } from "@/lib/data";
 import {
   createChannel,
   updateChannel,
   deleteChannel,
   disconnectChannel,
+  removeChannelMember,
 } from "@/lib/actions";
 
 type Draft = {
@@ -26,12 +28,79 @@ function toDraft(c: Channel): Draft {
   };
 }
 
+function MembersList({
+  channelId,
+  members,
+  currentUserId,
+}: {
+  channelId: string;
+  members: ChannelMemberInfo[];
+  currentUserId: string | null;
+}) {
+  const router = useRouter();
+  const [error, setError] = useState<string | null>(null);
+  const [removingId, setRemovingId] = useState<string | null>(null);
+  const [isPending, startTransition] = useTransition();
+
+  function remove(userId: string) {
+    setError(null);
+    setRemovingId(userId);
+    startTransition(async () => {
+      const result = await removeChannelMember(channelId, userId);
+      if (!result.ok) {
+        setError(result.error);
+        setRemovingId(null);
+        return;
+      }
+      router.refresh();
+    });
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }} className="text-muted">
+        Who has access ({members.length})
+      </span>
+      {members.map((m) => {
+        const isSelf = m.user_id === currentUserId;
+        return (
+          <div key={m.user_id} className="flex items-center gap-2" style={{ fontSize: 12 }}>
+            <span className="truncate" style={{ flex: 1 }}>
+              {m.email}
+              {isSelf && <span className="text-muted"> (you)</span>}
+            </span>
+            <button
+              className="btn btn-ghost"
+              style={{ fontSize: 11, padding: "3px 8px" }}
+              disabled={isPending && removingId === m.user_id}
+              onClick={() => remove(m.user_id)}
+            >
+              {isPending && removingId === m.user_id
+                ? "Removing…"
+                : isSelf
+                ? "Leave"
+                : "Remove access"}
+            </button>
+          </div>
+        );
+      })}
+      {error && (
+        <div style={{ fontSize: 11.5, color: "var(--color-accent-700)" }}>{error}</div>
+      )}
+    </div>
+  );
+}
+
 function ChannelCard({
   channel,
   shortsCount,
+  members,
+  currentUserId,
 }: {
   channel: Channel;
   shortsCount: number;
+  members: ChannelMemberInfo[];
+  currentUserId: string | null;
 }) {
   const router = useRouter();
   const [draft, setDraft] = useState<Draft>(toDraft(channel));
@@ -125,6 +194,8 @@ function ChannelCard({
           </a>
         )}
       </div>
+
+      <MembersList channelId={channel.id} members={members} currentUserId={currentUserId} />
 
       <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", gap: "var(--space-2)" }}>
         <div className="field">
@@ -223,6 +294,7 @@ function AddChannelCard() {
     youtube_channel_id: "",
   });
   const [error, setError] = useState<string | null>(null);
+  const [joinedMessage, setJoinedMessage] = useState<string | null>(null);
   const [isSaving, startSave] = useTransition();
 
   function set<K extends keyof Draft>(key: K) {
@@ -233,11 +305,17 @@ function AddChannelCard() {
   }
 
   function add() {
+    setJoinedMessage(null);
     startSave(async () => {
       const result = await createChannel(draft);
       if (!result.ok) {
         setError(result.error);
         return;
+      }
+      if (result.joinedExisting) {
+        setJoinedMessage(
+          `That YouTube channel was already connected here — you've been added as a co-member instead of creating a duplicate.`
+        );
       }
       setDraft({ name: "", sub: "", cadence: "", youtube_channel_id: "" });
       router.refresh();
@@ -257,9 +335,12 @@ function AddChannelCard() {
         Add a channel
       </div>
       <p className="text-muted" style={{ margin: 0, fontSize: 12.5 }}>
-        Adds the channel to your workspace so you can import, review, and
-        schedule Shorts for it. Connect it to YouTube afterward with the
-        button that appears on its card.
+        Only you can see this channel's shorts until someone else joins
+        it. If a teammate adds the same YouTube channel ID, they're added
+        as a co-member automatically instead of getting a disconnected
+        copy — everyone with access sees the same real shorts/history.
+        Connect it to YouTube afterward with the button that appears on
+        its card.
       </p>
 
       <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", gap: "var(--space-2)" }}>
@@ -306,6 +387,11 @@ function AddChannelCard() {
           {error}
         </div>
       )}
+      {joinedMessage && (
+        <div style={{ fontSize: 12, color: "var(--color-accent-2-800)" }}>
+          {joinedMessage}
+        </div>
+      )}
 
       <button
         className="btn btn-primary"
@@ -322,9 +408,13 @@ function AddChannelCard() {
 export default function ChannelsClient({
   channels,
   shortsCountByChannel,
+  membersByChannel,
+  currentUserId,
 }: {
   channels: Channel[];
   shortsCountByChannel: Record<string, number>;
+  membersByChannel: Record<string, ChannelMemberInfo[]>;
+  currentUserId: string | null;
 }) {
   const searchParams = useSearchParams();
   const connected = searchParams.get("connected");
@@ -336,7 +426,9 @@ export default function ChannelsClient({
         <h1 style={{ fontSize: 34, margin: "0 0 4px" }}>Channels</h1>
         <p className="text-muted" style={{ margin: 0, fontSize: "13.5px" }}>
           Add and manage the channels this workspace organizes Shorts for,
-          and connect each one to YouTube for real publishing.
+          and connect each one to YouTube for real publishing. Each
+          channel is only visible to its members — see &quot;Who has
+          access&quot; on a channel's card.
         </p>
       </div>
 
@@ -357,6 +449,8 @@ export default function ChannelsClient({
             key={c.id}
             channel={c}
             shortsCount={shortsCountByChannel[c.id] ?? 0}
+            members={membersByChannel[c.id] ?? []}
+            currentUserId={currentUserId}
           />
         ))}
         <AddChannelCard />

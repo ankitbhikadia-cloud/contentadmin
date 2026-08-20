@@ -1,4 +1,5 @@
-import { getChannels, getShorts } from "@/lib/data";
+import { getChannels, getShorts, getChannelMembers } from "@/lib/data";
+import { createClient } from "@/lib/supabase/server";
 import ChannelsClient from "./ChannelsClient";
 
 export const dynamic = "force-dynamic";
@@ -12,7 +13,25 @@ export default async function ChannelsPage() {
     },
     {}
   );
+
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  const membersByChannel: Record<string, Awaited<ReturnType<typeof getChannelMembers>>> = {};
+  await Promise.all(
+    channels.map(async (c) => {
+      membersByChannel[c.id] = await getChannelMembers(c.id);
+    })
+  );
+
   return (
-    <ChannelsClient channels={channels} shortsCountByChannel={shortsCountByChannel} />
+    <ChannelsClient
+      channels={channels}
+      shortsCountByChannel={shortsCountByChannel}
+      membersByChannel={membersByChannel}
+      currentUserId={user?.id ?? null}
+    />
   );
 }

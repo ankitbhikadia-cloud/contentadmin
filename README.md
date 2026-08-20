@@ -34,15 +34,51 @@ sending isn't configured yet for the project).
 
 ## Database
 
-Schema lives in `supabase/migrations/0001_init.sql`. It was applied
-directly to the `contentadmin` Supabase project; if you need to change
-it, add a new migration file and apply it the same way (or via the
+Schema lives in `supabase/migrations/`. Migrations were applied directly
+to the `contentadmin` Supabase project; if you need to change the
+schema, add a new migration file and apply it the same way (or via the
 Supabase CLI once you have local dev set up).
 
-Tables: `channels`, `shorts`, `short_alt_titles`, `reviews`,
-`upload_runs`, `import_batches`. RLS is enabled everywhere — any
-authenticated user has full access (this is an internal team tool, not
-multi-tenant).
+Tables: `channels`, `channel_members`, `shorts`, `short_alt_titles`,
+`reviews`, `upload_runs`, `import_batches`.
+
+## Multi-user access
+
+Logins don't share data by default. Every `channels` row (and, through
+it, its shorts, imports, reviews, upload history, and the actual video
+files in Storage) is only visible to the users listed in
+`channel_members` for that channel — RLS enforces this on every table,
+not just at the UI layer (see `supabase/migrations/0004_...` and
+`0006_...`). Two logins signed into the same workspace genuinely can't
+see each other's channels unless they're both members of the same one.
+
+A channel can still have more than one member — the point isn't "one
+channel, one user," it's "no accidental sharing." From `/channels` →
+"Add a channel," entering a YouTube channel ID that's already registered
+under an existing channel joins you as a co-member of that channel
+(`create_or_join_channel`, a security-definer Postgres function) instead
+of creating a disconnected duplicate — you land on the same real shorts,
+history, and YouTube connection as whoever added it first. Every member
+has equal permissions (edit, import, publish, add/remove other members);
+there's no owner/collaborator distinction. A channel's card shows "Who
+has access" with a "Remove access" / "Leave" button per member — removing
+the last member is blocked (delete the channel instead, so nothing ends
+up permanently unreachable from the app).
+
+The Vercel Cron job (`/api/cron/publish-due`) uses a service-role client
+and intentionally bypasses all of this — it publishes due shorts across
+every channel regardless of membership, since it's the one thing that's
+supposed to act on everyone's behalf. Everything reached through a
+user's own session (every page, every "Publish now"/"Check now" click)
+stays scoped to their channels.
+
+**Backfill note:** when this was introduced, both existing logins
+(`ankit.bhikadia@gmail.com` and `gopikakalathiya123@gmail.com`) were
+added as members of every channel that existed at the time, since there
+was no prior ownership data to migrate from and the app previously gave
+every authenticated user full access anyway. Prune access for whichever
+of those shouldn't actually have it from that channel's "Who has access"
+list.
 
 ## AI-drafted metadata
 

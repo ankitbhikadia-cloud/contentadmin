@@ -18,6 +18,32 @@ export type Database = {
   };
   public: {
     Tables: {
+      channel_members: {
+        Row: {
+          channel_id: string;
+          created_at: string;
+          user_id: string;
+        };
+        Insert: {
+          channel_id: string;
+          created_at?: string;
+          user_id: string;
+        };
+        Update: {
+          channel_id?: string;
+          created_at?: string;
+          user_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "channel_members_channel_id_fkey";
+            columns: ["channel_id"];
+            isOneToOne: false;
+            referencedRelation: "channels";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       channels: {
         Row: {
           cadence: string | null;
@@ -273,7 +299,38 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
-      [_ in never]: never;
+      create_or_join_channel: {
+        Args: {
+          p_cadence: string;
+          p_dot: string;
+          p_name: string;
+          p_sub: string;
+          p_youtube_channel_id: string;
+        };
+        Returns: {
+          cadence: string | null;
+          created_at: string;
+          dot: string | null;
+          id: string;
+          name: string;
+          sub: string | null;
+          youtube_access_token: string | null;
+          youtube_channel_id: string | null;
+          youtube_connected: boolean;
+          youtube_refresh_token: string | null;
+          youtube_token_expires_at: string | null;
+        }[];
+      };
+      get_channel_members: {
+        Args: { cid: string };
+        Returns: {
+          email: string;
+          joined_at: string;
+          user_id: string;
+        }[];
+      };
+      is_channel_member: { Args: { cid: string }; Returns: boolean };
+      is_short_member: { Args: { sid: string }; Returns: boolean };
     };
     Enums: {
       [_ in never]: never;
@@ -420,6 +477,8 @@ export type Review = Database["public"]["Tables"]["reviews"]["Row"];
 export type UploadRun = Database["public"]["Tables"]["upload_runs"]["Row"];
 export type ImportBatch =
   Database["public"]["Tables"]["import_batches"]["Row"];
+export type ChannelMember =
+  Database["public"]["Tables"]["channel_members"]["Row"];
 
 export type ShortStatus =
   | "draft"

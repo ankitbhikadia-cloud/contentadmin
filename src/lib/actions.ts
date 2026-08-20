@@ -166,33 +166,51 @@ const DOT_PALETTE = [
 ];
 
 export type ChannelActionResult = { ok: true } | { ok: false; error: string };
+export type CreateChannelResult =
+  | { ok: true; joinedExisting: boolean }
+  | { ok: false; error: string };
 
+// Creates a channel scoped to the current user, or — if someone else has
+// already added this same real YouTube channel (matched by
+// youtube_channel_id) — joins them as a co-member of that existing
+// channel instead, so they see its real shorts/history rather than
+// getting a disconnected duplicate. Both paths run atomically in
+// create_or_join_channel (see supabase/migrations/0004_...) so a channel
+// row can never end up with zero members.
 export async function createChannel(fields: {
   name: string;
   sub?: string;
   cadence?: string;
   youtube_channel_id?: string | null;
-}): Promise<ChannelActionResult> {
+}): Promise<CreateChannelResult> {
   const name = fields.name.trim();
   if (!name) return { ok: false, error: "Channel name is required." };
 
   const supabase = await createClient();
   const { count } = await supabase
-    .from("channels")
+    .from("channel_members")
     .select("*", { count: "exact", head: true });
   const dot = DOT_PALETTE[(count ?? 0) % DOT_PALETTE.length];
 
-  const { error } = await supabase.from("channels").insert({
-    name,
-    sub: fields.sub?.trim() || null,
-    cadence: fields.cadence?.trim() || null,
-    youtube_channel_id: fields.youtube_channel_id?.trim() || null,
-    dot,
+  const { data, error } = await supabase.rpc("create_or_join_channel", {
+    p_name: name,
+    p_sub: fields.sub?.trim() || "",
+    p_cadence: fields.cadence?.trim() || "",
+    p_dot: dot,
+    p_youtube_channel_id: fields.youtube_channel_id?.trim() || "",
   });
   if (error) return { ok: false, error: error.message };
+  const channel = Array.isArray(data) ? data[0] : data;
+  if (!channel) return { ok: false, error: "Something went wrong creating the channel." };
+
+  const { count: memberCount } = await supabase
+    .from("channel_members")
+    .select("*", { count: "exact", head: true })
+    .eq("channel_id", channel.id);
+
   revalidatePath("/", "layout");
   revalidatePath("/channels");
-  return { ok: true };
+  return { ok: true, joinedExisting: (memberCount ?? 1) > 1 };
 }
 
 export async function updateChannel(
@@ -221,7 +239,18 @@ export async function updateChannel(
         : {}),
     })
     .eq("id", id);
-  if (error) return { ok: false, error: error.message };
+  if (error) {
+    // Postgres unique_violation on channels_youtube_channel_id_unique —
+    // someone else already has this exact YouTube channel ID registered.
+    if (error.code === "23505") {
+      return {
+        ok: false,
+        error:
+          "That YouTube channel ID is already connected under a different channel here. Use \"Add a channel\" with that same ID instead — you'll join it as a co-member.",
+      };
+    }
+    return { ok: false, error: error.message };
+  }
   revalidatePath("/", "layout");
   revalidatePath("/channels");
   return { ok: true };
@@ -240,6 +269,37 @@ export async function deleteChannel(id: string): Promise<ChannelActionResult> {
     };
   }
   const { error } = await supabase.from("channels").delete().eq("id", id);
+  if (error) return { ok: false, error: error.message };
+  revalidatePath("/", "layout");
+  revalidatePath("/channels");
+  return { ok: true };
+}
+
+// Removes a member's access to a channel (or lets someone leave it
+// themselves). Refuses to remove the last remaining member — that would
+// orphan the channel (RLS would make it invisible to everyone, including
+// service-role automation still has access, but no one could manage it
+// from the app again without going through the database directly).
+export async function removeChannelMember(
+  channelId: string,
+  userId: string
+): Promise<ChannelActionResult> {
+  const supabase = await createClient();
+  const { count } = await supabase
+    .from("channel_members")
+    .select("*", { count: "exact", head: true })
+    .eq("channel_id", channelId);
+  if ((count ?? 0) <= 1) {
+    return {
+      ok: false,
+      error: "Can't remove the last person with access — delete the channel instead.",
+    };
+  }
+  const { error } = await supabase
+    .from("channel_members")
+    .delete()
+    .eq("channel_id", channelId)
+    .eq("user_id", userId);
   if (error) return { ok: false, error: error.message };
   revalidatePath("/", "layout");
   revalidatePath("/channels");

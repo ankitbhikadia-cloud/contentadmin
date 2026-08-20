@@ -5,6 +5,10 @@ import type { Channel, Short, Review, UploadRun } from "@/lib/database.types";
 // so they never end up in a client component's serialized props. Only
 // src/lib/youtube.ts and the server actions that call it read the real
 // tokens, via getChannelTokens() below — never through this function.
+//
+// No explicit user filter here — RLS (see supabase/migrations/0004_...)
+// scopes this to only the channels the current user is a member of, so
+// a login never sees another user's channels or shorts.
 export async function getChannels(): Promise<Channel[]> {
   const supabase = await createClient();
   const { data, error } = await supabase
@@ -17,6 +21,19 @@ export async function getChannels(): Promise<Channel[]> {
     youtube_access_token: null,
     youtube_refresh_token: null,
   }));
+}
+
+export type ChannelMemberInfo = { user_id: string; email: string; joined_at: string };
+
+// Who else has access to this channel. Goes through the get_channel_members
+// RPC (security definer) rather than a direct select, since auth.users
+// emails aren't otherwise exposed to PostgREST — the RPC itself checks
+// the caller is a member before returning anything.
+export async function getChannelMembers(channelId: string): Promise<ChannelMemberInfo[]> {
+  const supabase = await createClient();
+  const { data, error } = await supabase.rpc("get_channel_members", { cid: channelId });
+  if (error) throw error;
+  return data ?? [];
 }
 
 // Server-only: reads the real OAuth tokens for one channel. Never call

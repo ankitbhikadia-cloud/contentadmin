@@ -30,6 +30,9 @@ export async function GET(request: NextRequest) {
     const expiresAt = new Date(Date.now() + tokens.expires_in * 1000).toISOString();
 
     const supabase = await createClient();
+    // .select().single() so a channel this user isn't a member of (RLS
+    // silently matches 0 rows on a plain .update()) surfaces as a real
+    // error instead of a false "connected=1" redirect.
     const { error } = await supabase
       .from("channels")
       .update({
@@ -38,8 +41,16 @@ export async function GET(request: NextRequest) {
         youtube_token_expires_at: expiresAt,
         youtube_connected: true,
       })
-      .eq("id", channelId);
-    if (error) throw error;
+      .eq("id", channelId)
+      .select("id")
+      .single();
+    if (error) {
+      throw new Error(
+        error.code === "PGRST116"
+          ? "You don't have access to that channel."
+          : error.message
+      );
+    }
 
     return NextResponse.redirect(new URL("/channels?connected=1", request.url));
   } catch (err) {

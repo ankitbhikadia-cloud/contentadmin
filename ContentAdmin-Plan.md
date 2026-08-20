@@ -285,3 +285,63 @@ than the originally-planned 15-minute one.
 If you want the tighter cadence back later, upgrading the Vercel team to
 Pro and reverting `vercel.json`'s schedule to `*/15 * * * *` is the
 whole change.
+
+## Status (2026-08-20, evening) — per-user channel access, real multi-tenancy
+
+You flagged that videos shouldn't be shared across logins, with the
+twist that a single real YouTube channel can still have more than one
+app user attached to it. Confirmed via `auth.users` there are genuinely
+two logins on this project already
+(`ankit.bhikadia@gmail.com`, `gopikakalathiya123@gmail.com`), so this
+wasn't hypothetical.
+
+Before building, asked and got two decisions: (1) adding a channel with
+a YouTube channel ID that's already registered auto-joins you as a
+co-member rather than requiring approval or creating a duplicate, and
+(2) all members of a channel get equal permissions — no owner role.
+
+What changed, end to end — not just the database:
+
+- New `channel_members` table + a `create_or_join_channel` security-
+  definer Postgres function that atomically creates-or-joins so a
+  channel can never end up with zero members (migration `0004`).
+- RLS on `channels`, `shorts`, `short_alt_titles`, `reviews`,
+  `upload_runs`, and `import_batches` rewritten from "any authenticated
+  user" to membership-scoped, via `is_channel_member`/`is_short_member`
+  helper functions (also `0004`). Locked the new functions' grants down
+  to `authenticated` only in `0005` — Postgres grants EXECUTE to PUBLIC
+  by default, which would've included the unauthenticated `anon` role.
+- **Caught before shipping**: the actual video files in the `shorts`
+  Storage bucket had no per-channel restriction at all — any
+  authenticated user could read/write/delete any file regardless of
+  channel, since the bucket's RLS only checked `bucket_id = 'shorts'`.
+  This was the literal thing you asked about ("this videos should not be
+  shared"), not just the metadata rows, so fixed it the same way,
+  scoping by the channel-ID folder prefix in each object's path
+  (migration `0006`).
+- `create_or_join_channel` also picked up the dedup logic: matching by
+  `youtube_channel_id` (now unique where non-null) to decide join vs.
+  create.
+- Channels page: new "Who has access" list per channel with
+  "Remove access" / "Leave" per member (`removeChannelMember`, blocked
+  from removing the last member), and a message when "Add a channel"
+  joined an existing one instead of creating a duplicate.
+- Caught two edge cases in the OAuth connect flow while reviewing it
+  against the new RLS: the callback's channel `.update()` would have
+  silently no-op'd (0 rows, no thrown error) for someone hitting
+  `/auth/youtube/connect?channel=<id>` on a channel they're not a member
+  of, falsely redirecting to `?connected=1`. Added a membership check up
+  front in the connect route (fails fast, before sending them through
+  Google) and made the callback's write detect and surface a real error
+  instead of a false success.
+- Backfilled: both existing logins were added as members of every
+  channel that existed before this change, since there's no prior
+  ownership data and the app previously gave every authenticated user
+  full access anyway. Prune from "Who has access" on the Channels page
+  for whichever of the two shouldn't actually have it.
+
+Nice side effect, no code change needed: `getDueShorts`/`checkAndPublishDue`
+("Check now") already used the caller's own session client, so it's now
+correctly scoped to just that user's channels automatically — only the
+daily cron (service-role client, intentionally) still acts across
+everyone.
