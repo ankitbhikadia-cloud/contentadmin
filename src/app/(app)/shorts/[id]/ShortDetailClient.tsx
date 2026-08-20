@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { Channel, Review, Short, ShortAltTitle } from "@/lib/database.types";
@@ -47,6 +47,30 @@ export default function ShortDetailClient({
   const [allowComments, setAllowComments] = useState(short.allow_comments);
   const [noteDraft, setNoteDraft] = useState("");
   const [dirty, setDirty] = useState(false);
+
+  // title/description/tags are edited locally and only written back on
+  // "Save changes" — but "Draft with AI" and picking an alt title both
+  // write straight to the DB via a server action, then router.refresh()
+  // gives this component a fresh `short` prop. useState's initial value
+  // is only used on first mount, so without this, those flows updated
+  // the database and the read-only heading (which renders short.title
+  // directly) while the editable fields silently kept showing whatever
+  // was there before — exactly the "only title updated" bug. Re-sync
+  // whenever the server's actual content changes; string/joined deps
+  // (not the raw short.tags array reference, which is a new array on
+  // every refresh regardless of content) keep this from also firing,
+  // and discarding an in-progress unsaved edit, on refreshes that don't
+  // touch these fields (approving, adding a review, publishing).
+  const tagsKey = (short.tags ?? []).join(" ");
+  useEffect(() => {
+    setTitle(short.title);
+    setDescription(short.description);
+    setTags(short.tags ?? []);
+    setDirty(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- tagsKey is
+    // the intentional value-stable proxy for short.tags, see comment above.
+  }, [short.title, short.description, tagsKey]);
+
   const [isPending, startTransition] = useTransition();
   const [isApproving, startApprove] = useTransition();
   const [isNoting, startNote] = useTransition();
