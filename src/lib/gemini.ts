@@ -17,6 +17,14 @@ import { parseDraftedMetadataJson, type DraftedMetadata } from "@/lib/ai";
 const FILES_BASE = "https://generativelanguage.googleapis.com/v1beta";
 const UPLOAD_URL = "https://generativelanguage.googleapis.com/upload/v1beta/files";
 const MODEL = process.env.GEMINI_MODEL || "gemini-3.7-flash";
+// Older, lower-demand Flash generation to fall back to if MODEL keeps
+// getting 503'd — confirmed still current/stable on ai.google.dev as of
+// Aug 2026, described there as "best price-performance...low-latency,
+// high-volume," which is exactly the profile you want under load. Only
+// used as a last resort after MODEL's own retries are exhausted (see
+// generateContentWithRetry below), and only if it's actually different
+// from MODEL — no point falling back to the same model.
+const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-2.5-flash";
 
 // How long to wait for Google to finish processing an uploaded video
 // before giving up. Video processing time scales with length, but a
@@ -132,6 +140,130 @@ async function deleteFile(apiKey: string, fileName: string): Promise<void> {
   }
 }
 
+// Gemini's own docs describe 503 UNAVAILABLE ("high demand") and 429
+// RESOURCE_EXHAUSTED as transient — the recommended handling is a retry
+// with backoff, not surfacing it as a hard failure. Everything else
+// (4xx auth/validation errors, 500s that aren't the overload message)
+// still throws immediately on the first attempt. They're handled the
+// same way here rather than split apart: a 429 on this endpoint is
+// per-minute request-rate throttling, not a hard monthly quota wall, so
+// backing off and retrying the same key is still the right move — we
+// don't run multi-key rotation, which is the only case where the two
+// would need genuinely different handling.
+const RETRYABLE_STATUSES = new Set([429, 503]);
+// Exponential backoff with jitter: 3 retries beyond the initial attempt
+// (4 attempts total), doubling from a 2s base, each with 0-1s of random
+// jitter added so concurrent requests from this app don't all retry in
+// lockstep against a recovering endpoint.
+const RETRY_BASE_DELAY_MS = 2_000;
+const MAX_RETRIES = 3;
+const MAX_JITTER_MS = 1_000;
+// Bound a single attempt so a hung connection to an overloaded endpoint
+// can't quietly eat the whole request budget — an attempt that times
+// out is treated as retryable, same as a 503. Sized, together with the
+// numbers above, so the absolute worst case (every attempt times out,
+// including the one fallback-model attempt) stays comfortably inside
+// the budget left over after waitForActive's own 180s ceiling, within
+// the 300s maxDuration on the pages that call this: 4 attempts x 15s +
+// ~15s of backoff + one 15s fallback attempt ≈ 90s, vs. ~110s available.
+const REQUEST_TIMEOUT_MS = 15_000;
+
+class GeminiRequestError extends Error {
+  constructor(public status: number | "timeout", message: string) {
+    super(message);
+  }
+}
+
+async function callGenerateContent(
+  apiKey: string,
+  model: string,
+  body: Record<string, unknown>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- raw Gemini
+  // response JSON; shape-checked by the caller before use.
+): Promise<any> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(`${FILES_BASE}/models/${model}:generateContent`, {
+      method: "POST",
+      headers: {
+        "x-goog-api-key": apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new GeminiRequestError(
+        "timeout",
+        `Gemini generateContent (${model}) didn't respond within ${REQUEST_TIMEOUT_MS / 1000}s.`
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+  if (res.ok) return res.json();
+  const responseBody = await res.text().catch(() => "");
+  throw new GeminiRequestError(
+    res.status,
+    `Gemini generateContent (${model}) failed (${res.status}): ${responseBody.slice(0, 300)}`
+  );
+}
+
+function isRetryable(err: unknown): err is GeminiRequestError {
+  return (
+    err instanceof GeminiRequestError &&
+    (err.status === "timeout" || RETRYABLE_STATUSES.has(err.status))
+  );
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- see callGenerateContent
+async function generateContentWithRetry(
+  apiKey: string,
+  body: Record<string, unknown>
+): Promise<any> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await callGenerateContent(apiKey, MODEL, body);
+    } catch (err) {
+      lastError = err;
+      if (!isRetryable(err) || attempt === MAX_RETRIES) break;
+      const delay = RETRY_BASE_DELAY_MS * 2 ** attempt + Math.random() * MAX_JITTER_MS;
+      console.error(
+        `Gemini generateContent (${MODEL}) got a retryable error, retrying in ${Math.round(delay)}ms (attempt ${attempt + 1}/${MAX_RETRIES + 1}):`,
+        err instanceof Error ? err.message : err
+      );
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+
+  // MODEL's own retries are exhausted. If it was a retryable condition
+  // (sustained overload, not a bad key or malformed request) and a
+  // distinct fallback model is configured, spend one more attempt there
+  // before giving up entirely.
+  if (isRetryable(lastError) && FALLBACK_MODEL !== MODEL) {
+    console.error(
+      `Gemini generateContent (${MODEL}) exhausted retries, falling back to ${FALLBACK_MODEL} for one attempt.`
+    );
+    try {
+      return await callGenerateContent(apiKey, FALLBACK_MODEL, body);
+    } catch (fallbackErr) {
+      throw new Error(
+        `Gemini generateContent failed on both ${MODEL} and fallback ${FALLBACK_MODEL}. ` +
+          `Last error: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`
+      );
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Gemini generateContent failed for an unknown reason.");
+}
+
 export async function draftMetadataFromVideo(input: {
   videoBytes: ArrayBuffer;
   mimeType: string;
@@ -178,31 +310,16 @@ this exact shape:
   "trendNote": "one short sentence explaining the score"
 }`;
 
-    const res = await fetch(
-      `${FILES_BASE}/models/${MODEL}:generateContent`,
-      {
-        method: "POST",
-        headers: {
-          "x-goog-api-key": apiKey,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                { file_data: { mime_type: input.mimeType, file_uri: file.uri } },
-                { text: prompt },
-              ],
-            },
+    const json = await generateContentWithRetry(apiKey, {
+      contents: [
+        {
+          parts: [
+            { file_data: { mime_type: input.mimeType, file_uri: file.uri } },
+            { text: prompt },
           ],
-        }),
-      }
-    );
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`Gemini generateContent failed (${res.status}): ${body.slice(0, 300)}`);
-    }
-    const json = await res.json();
+        },
+      ],
+    });
     const parts: Array<{ text?: string }> = json?.candidates?.[0]?.content?.parts ?? [];
     const text = parts.find((p) => typeof p?.text === "string")?.text;
     if (!text) {
