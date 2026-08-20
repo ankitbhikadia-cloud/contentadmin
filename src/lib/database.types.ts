@@ -11,9 +11,6 @@ export type Json =
   | Json[];
 
 export interface Database {
-  __InternalSupabase: {
-    PostgrestVersion: "14.15";
-  };
   public: {
     Tables: {
       channels: {
