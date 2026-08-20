@@ -345,3 +345,41 @@ Nice side effect, no code change needed: `getDueShorts`/`checkAndPublishDue`
 correctly scoped to just that user's channels automatically — only the
 daily cron (service-role client, intentionally) still acts across
 everyone.
+
+### Caught right after shipping: the RLS rewrite hadn't actually applied
+
+You removed `gopikakalathiya123@gmail.com` from the one existing channel
+via the new "Remove access" button, then logged in as her and hit a
+server error on `/channels` (digest `2411531117`). `get_runtime_errors`
+showed the real Postgres error underneath: `P0001 "Not a member of this
+channel"` — thrown by `get_channel_members`, correctly, for a channel
+`getChannels()` had just handed back to her anyway.
+
+Root cause: migration `0004`'s `drop policy if exists "..." on channels`
+(and 5 other tables) guessed at the original policy's name from
+`0001_init.sql` — three guesses, none right. `DROP POLICY IF EXISTS`
+doesn't error on a non-matching name, it just silently does nothing, so
+the real policy (`"authenticated full access"`, `ALL`, `qual: true`)
+stayed active this entire time. Postgres RLS policies are OR'd together,
+so that one permissive policy alone kept every row on `channels`,
+`shorts`, `short_alt_titles`, `reviews`, `upload_runs`, and
+`import_batches` visible to every authenticated user regardless of the
+new membership policies sitting right next to it — the entire per-user
+access change had been a no-op on every table except `channel_members`
+and the Storage bucket (those two used their real names, confirmed by
+querying `pg_policies` before writing that migration, which is exactly
+why they didn't have this bug).
+
+Confirmed the real policy name by querying `pg_policies` directly rather
+than guessing again, then dropped it for real (migration `0007`).
+Re-queried `pg_policies` afterward to confirm only the intended
+membership-scoped policies remain on every table. Also hardened
+`/channels`'s page component to catch a single channel's
+`getChannelMembers` failure without taking down the whole page — it
+shouldn't be possible for `channels`-select and `get_channel_members` to
+disagree on membership again, but it clearly wasn't impossible before
+either.
+
+Lesson for future RLS migrations on this project: never guess a policy
+name in a `drop policy` statement — query `pg_policies` first, every
+time, even for "obviously" named policies.

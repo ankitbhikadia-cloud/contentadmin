@@ -19,10 +19,23 @@ export default async function ChannelsPage() {
     data: { user },
   } = await supabase.auth.getUser();
 
+  // Defensive: getChannelMembers throws if the RPC decides this user
+  // isn't actually a member of a channel (see get_channel_members in
+  // supabase/migrations/0004_...). That should never happen for a
+  // channel getChannels() just returned — RLS on `channels` and the
+  // RPC's own check both key off is_channel_member — but a stale RLS
+  // policy previously made exactly that mismatch possible in production
+  // (fixed in migration 0007) and took the whole page down with it. One
+  // channel's member list failing to load shouldn't do that again.
   const membersByChannel: Record<string, Awaited<ReturnType<typeof getChannelMembers>>> = {};
   await Promise.all(
     channels.map(async (c) => {
-      membersByChannel[c.id] = await getChannelMembers(c.id);
+      try {
+        membersByChannel[c.id] = await getChannelMembers(c.id);
+      } catch (err) {
+        console.error(`Failed to load members for channel ${c.id}:`, err);
+        membersByChannel[c.id] = [];
+      }
     })
   );
 
