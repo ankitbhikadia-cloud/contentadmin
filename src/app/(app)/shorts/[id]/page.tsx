@@ -1,9 +1,12 @@
 import { notFound } from "next/navigation";
-import { getShortById, getChannels, getReviewsForShort } from "@/lib/data";
+import { getShortById, getChannels, getReviewsForShort, getAltTitles } from "@/lib/data";
 import { createClient } from "@/lib/supabase/server";
 import ShortDetailClient from "./ShortDetailClient";
 
 export const dynamic = "force-dynamic";
+// Real YouTube uploads can take longer than the default function timeout —
+// see src/lib/publish.ts.
+export const maxDuration = 300;
 
 export default async function ShortDetailPage({
   params,
@@ -11,10 +14,11 @@ export default async function ShortDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const [short, channels, reviews] = await Promise.all([
+  const [short, channels, reviews, altTitles] = await Promise.all([
     getShortById(id),
     getChannels(),
     getReviewsForShort(id),
+    getAltTitles(id),
   ]);
 
   if (!short) notFound();
@@ -31,6 +35,7 @@ export default async function ShortDetailPage({
       short={short}
       channel={channel}
       reviews={reviews}
+      altTitles={altTitles}
       currentUserEmail={user?.email ?? "you"}
     />
   );

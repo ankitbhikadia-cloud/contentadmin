@@ -1,9 +1,14 @@
 import { getChannels, getUploadRuns } from "@/lib/data";
+import PublishDueButton from "./PublishDueButton";
 
 export const dynamic = "force-dynamic";
+// A manual "publish due shorts now" run can take a while for real
+// uploads — see src/lib/publish.ts.
+export const maxDuration = 300;
 
 export default async function AutoUploaderPage() {
   const [channels, runs] = await Promise.all([getChannels(), getUploadRuns()]);
+  const connectedCount = channels.filter((c) => c.youtube_connected).length;
 
   return (
     <div className="page" style={{ maxWidth: 1080 }}>
@@ -11,23 +16,39 @@ export default async function AutoUploaderPage() {
         <div className="flex-1" style={{ minWidth: 240 }}>
           <h1 style={{ fontSize: 34, margin: "0 0 4px" }}>Auto-uploader</h1>
           <p className="text-muted" style={{ margin: 0, fontSize: "13.5px" }}>
-            Publishes each approved short to YouTube at its slot, via the
-            real YouTube Data API — no browser bot, no shared passwords.
+            Publishes each approved, scheduled short to YouTube at its slot,
+            via the real YouTube Data API — no browser bot, no shared
+            passwords.
           </p>
         </div>
-        <span className="tag tag-neutral">Not connected yet</span>
+        <span className={connectedCount > 0 ? "tag tag-accent-2" : "tag tag-neutral"}>
+          {connectedCount > 0
+            ? `${connectedCount} channel${connectedCount === 1 ? "" : "s"} connected`
+            : "Nothing connected yet"}
+        </span>
       </div>
 
       <div
         className="flex items-center gap-3 flex-wrap"
         style={{ padding: "var(--space-3) var(--space-4)", borderRadius: 26, background: "var(--color-surface)" }}
       >
-        <span style={{ width: 9, height: 9, borderRadius: 999, background: "var(--color-neutral-400)" }} />
-        <span style={{ font: "400 17px/1 var(--font-heading)" }}>Not set up</span>
-        <span className="text-muted" style={{ fontSize: "12.5px" }}>
-          Connect each channel&apos;s YouTube account to start publishing
-          automatically.
+        <span
+          style={{
+            width: 9,
+            height: 9,
+            borderRadius: 999,
+            background: connectedCount > 0 ? "var(--color-accent-2-600)" : "var(--color-neutral-400)",
+          }}
+        />
+        <span style={{ font: "400 17px/1 var(--font-heading)" }}>
+          {connectedCount > 0 ? "Live" : "Not set up"}
         </span>
+        <span className="text-muted" style={{ fontSize: "12.5px" }}>
+          A background job checks every 15 minutes for approved shorts past
+          their slot time on connected channels and publishes them
+          automatically. You can also trigger a check right now:
+        </span>
+        <PublishDueButton />
       </div>
 
       <div className="flex flex-col gap-2">
@@ -42,12 +63,31 @@ export default async function AutoUploaderPage() {
               <span style={{ font: "700 13px/1.25 var(--font-body)" }}>{c.name}</span>
               <span className="text-muted" style={{ fontSize: 11 }}>{c.sub}</span>
             </div>
-            <span className="tag tag-outline">Not connected</span>
-            <button className="btn btn-secondary" style={{ fontSize: 12, padding: "6px 12px" }} disabled title="YouTube OAuth connect is coming in a later phase">
-              Connect this channel
-            </button>
+            {c.youtube_connected ? (
+              <span className="tag tag-accent-2">Connected</span>
+            ) : (
+              <>
+                <span className="tag tag-outline">Not connected</span>
+                <a
+                  href={`/auth/youtube/connect?channel=${c.id}`}
+                  className="btn btn-secondary"
+                  style={{ fontSize: 12, padding: "6px 12px" }}
+                >
+                  Connect this channel
+                </a>
+              </>
+            )}
           </div>
         ))}
+        {channels.length === 0 && (
+          <div className="text-muted" style={{ fontSize: 13, padding: "var(--space-3)" }}>
+            No channels yet — add one from{" "}
+            <a href="/channels" style={{ color: "var(--color-accent)" }}>
+              Channels
+            </a>
+            .
+          </div>
+        )}
       </div>
 
       {runs.length > 0 && (
@@ -76,9 +116,12 @@ export default async function AutoUploaderPage() {
           When something breaks
         </div>
         <div style={{ fontSize: "12.5px", lineHeight: 1.55, color: "var(--color-accent-900)", opacity: 0.85, maxWidth: "66ch" }}>
-          Once connected: two automatic retries, ten minutes apart. If it
-          still fails you get one plain sentence in this log, and the short
-          goes back to the queue with its slot held for an hour.
+          Two automatic retries (the cron job's own 15-minute cadence
+          spaces them out). If it still fails on the third attempt, you get
+          the real error from YouTube in this log, the short flips to
+          "failed" in the Queue, and its slot moves an hour out so it stops
+          blocking that calendar slot — publishing it again from there is a
+          manual "Publish now" on its detail page, not automatic.
         </div>
       </div>
     </div>

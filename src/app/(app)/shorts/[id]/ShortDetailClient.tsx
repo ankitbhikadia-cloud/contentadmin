@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import type { Channel, Review, Short } from "@/lib/database.types";
+import type { Channel, Review, Short, ShortAltTitle } from "@/lib/database.types";
 import {
   formatDuration,
   formatSlotFull,
@@ -11,17 +11,26 @@ import {
   statusLabel,
   statusTagClass,
 } from "@/lib/format";
-import { approveShort, addReview, updateShortFields } from "@/lib/actions";
+import {
+  approveShort,
+  addReview,
+  updateShortFields,
+  draftMetadata,
+  useAltTitle,
+  publishShortNow,
+} from "@/lib/actions";
 
 export default function ShortDetailClient({
   short,
   channel,
   reviews,
+  altTitles,
   currentUserEmail,
 }: {
   short: Short;
   channel: Channel | null;
   reviews: Review[];
+  altTitles: ShortAltTitle[];
   currentUserEmail: string;
 }) {
   const router = useRouter();
@@ -38,6 +47,11 @@ export default function ShortDetailClient({
   const [isPending, startTransition] = useTransition();
   const [isApproving, startApprove] = useTransition();
   const [isNoting, startNote] = useTransition();
+  const [isDrafting, startDraft] = useTransition();
+  const [isPublishing, startPublish] = useTransition();
+  const [draftError, setDraftError] = useState<string | null>(null);
+  const [publishError, setPublishError] = useState<string | null>(null);
+  const [publishedId, setPublishedId] = useState<string | null>(null);
 
   function markDirty<T>(setter: (v: T) => void) {
     return (v: T) => {
@@ -95,6 +109,39 @@ export default function ShortDetailClient({
     });
   }
 
+  function draftWithAi() {
+    setDraftError(null);
+    startDraft(async () => {
+      const result = await draftMetadata(short.id);
+      if (!result.ok) {
+        setDraftError(result.error);
+        return;
+      }
+      router.refresh();
+    });
+  }
+
+  function pickAltTitle(text: string) {
+    startTransition(async () => {
+      await useAltTitle(short.id, text);
+      router.refresh();
+    });
+  }
+
+  function publishNow() {
+    setPublishError(null);
+    setPublishedId(null);
+    startPublish(async () => {
+      const result = await publishShortNow(short.id);
+      if (!result.ok) {
+        setPublishError(result.error);
+        return;
+      }
+      setPublishedId(result.videoId);
+      router.refresh();
+    });
+  }
+
   return (
     <div className="page" style={{ maxWidth: 1180 }}>
       <div className="flex items-center gap-2">
@@ -148,11 +195,55 @@ export default function ShortDetailClient({
           </div>
           <div className="card elev-sm" style={{ gap: "var(--space-2)" }}>
             <div className="card-kicker">Trend read</div>
-            <div style={{ fontSize: "11.5px", lineHeight: 1.5, color: "color-mix(in srgb, var(--color-text) 62%, transparent)" }}>
-              Trend scoring isn&apos;t wired up yet — it arrives with AI
-              metadata drafting in a later phase.
-            </div>
+            {short.trend_score != null ? (
+              <>
+                <div className="flex items-center gap-2">
+                  <span style={{ font: "400 26px/1 var(--font-heading)" }}>
+                    {short.trend_score}
+                  </span>
+                  <span style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+                    / 100 hook/SEO estimate
+                  </span>
+                </div>
+                {short.trend_note && (
+                  <div style={{ fontSize: "11.5px", lineHeight: 1.5, color: "color-mix(in srgb, var(--color-text) 62%, transparent)" }}>
+                    {short.trend_note}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div style={{ fontSize: "11.5px", lineHeight: 1.5, color: "color-mix(in srgb, var(--color-text) 62%, transparent)" }}>
+                Not scored yet — click &quot;Draft with AI&quot; to get a
+                real, AI-estimated hook/SEO score for the current title and
+                description.
+              </div>
+            )}
           </div>
+
+          {altTitles.length > 0 && (
+            <div className="card elev-sm" style={{ gap: "var(--space-2)" }}>
+              <div className="card-kicker">AI alt titles</div>
+              {altTitles.map((alt) => (
+                <button
+                  key={alt.id}
+                  onClick={() => pickAltTitle(alt.text)}
+                  className="flex items-center gap-2"
+                  style={{
+                    border: 0,
+                    background: "var(--color-bg)",
+                    borderRadius: 14,
+                    padding: "8px 10px",
+                    textAlign: "left",
+                    cursor: "pointer",
+                    fontSize: "12px",
+                    lineHeight: 1.4,
+                  }}
+                >
+                  {alt.text}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="flex flex-col gap-4">
@@ -169,17 +260,20 @@ export default function ShortDetailClient({
             </div>
             <div className="flex gap-2">
               <button
+                onClick={draftWithAi}
+                disabled={isDrafting}
                 className="btn btn-secondary"
-                disabled
-                title="AI metadata drafting is coming in a later phase"
               >
-                Draft with AI
+                {isDrafting ? "Drafting…" : "Draft with AI"}
               </button>
               <button onClick={approve} disabled={isApproving || short.status === "approved"} className="btn btn-primary">
                 {short.status === "approved" ? "Approved ✓" : isApproving ? "Approving…" : "Approve for upload"}
               </button>
             </div>
           </div>
+          {draftError && (
+            <div style={{ fontSize: 12, color: "var(--color-accent-700)" }}>{draftError}</div>
+          )}
 
           <div className="flex flex-col gap-3" style={{ padding: "var(--space-4)", borderRadius: 26, background: "var(--color-surface)" }}>
             <div className="field">
@@ -302,12 +396,49 @@ export default function ShortDetailClient({
               <Link href="/calendar" className="btn btn-secondary" style={{ alignSelf: "flex-start", fontSize: "12.5px" }}>
                 Change on calendar
               </Link>
-              <div className="flex items-center gap-2" style={{ marginTop: "auto", padding: "var(--space-2) var(--space-3)", borderRadius: 18, background: "var(--color-bg)" }}>
-                <span style={{ fontSize: "11.5px", lineHeight: 1.4, color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>
-                  Publishing isn&apos;t connected yet, so approved shorts hold
-                  their slot until that&apos;s wired up.
-                </span>
-              </div>
+              {channel?.youtube_connected ? (
+                <div className="flex flex-col gap-2" style={{ marginTop: "auto" }}>
+                  <button
+                    onClick={publishNow}
+                    disabled={isPublishing || short.status === "live"}
+                    className="btn btn-primary"
+                    style={{ fontSize: "12.5px" }}
+                  >
+                    {short.status === "live"
+                      ? "Live on YouTube ✓"
+                      : isPublishing
+                      ? "Uploading to YouTube…"
+                      : "Publish now"}
+                  </button>
+                  {publishError && (
+                    <span style={{ fontSize: 11.5, color: "var(--color-accent-700)" }}>
+                      {publishError}
+                    </span>
+                  )}
+                  {publishedId && (
+                    <a
+                      href={`https://youtube.com/watch?v=${publishedId}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ fontSize: 11.5, color: "var(--color-accent-700)" }}
+                    >
+                      View on YouTube →
+                    </a>
+                  )}
+                </div>
+              ) : (
+                <div className="flex items-center gap-2" style={{ marginTop: "auto", padding: "var(--space-2) var(--space-3)", borderRadius: 18, background: "var(--color-bg)" }}>
+                  <span style={{ fontSize: "11.5px", lineHeight: 1.4, color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>
+                    {channel
+                      ? `${channel.name} isn't connected to YouTube yet.`
+                      : "No channel."}{" "}
+                    <Link href="/channels" style={{ color: "var(--color-accent)" }}>
+                      Connect it
+                    </Link>{" "}
+                    to publish for real.
+                  </span>
+                </div>
+              )}
             </div>
           </div>
 

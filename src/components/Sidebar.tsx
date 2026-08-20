@@ -98,6 +98,19 @@ export default function Sidebar({
             </span>
           </Link>
         ))}
+        <Link
+          href="/channels"
+          className={`channel-item${pathname === "/channels" ? " active" : ""}`}
+          style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}
+        >
+          <span
+            className="dot"
+            style={{ background: "transparent", border: "1.5px dashed color-mix(in srgb, var(--color-text) 45%, transparent)" }}
+          />
+          <span style={{ font: "700 12px/1.1 var(--font-body)" }}>
+            + Add / manage channels
+          </span>
+        </Link>
       </div>
 
       <div className="flex flex-col" style={{ gap: 2 }}>

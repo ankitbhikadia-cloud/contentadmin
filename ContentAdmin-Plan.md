@@ -113,3 +113,147 @@ landed:
 
 Once either is unblocked, say so and I'll pick this back up — the app
 itself is done and just needs somewhere to land.
+
+## Status (2026-08-20, later) — shipped and live
+
+Both blockers cleared. GitHub push went through the user's local machine
+(this sandbox's git proxy only allows pushes to pre-authorized repos, so
+code changes get handed over as files and pushed locally — see below).
+Vercel deployed successfully via `create_git_project` once the repo
+existed. Live at **https://contentadmin.vercel.app**.
+
+Along the way, fixed a real build bug: `@supabase/ssr` was pinned to a
+stale `^0.5.2` while `@supabase/supabase-js` resolved much newer, which
+broke `.update()`/`.insert()` type inference (`never` errors) on Vercel's
+build. Bumped `@supabase/ssr` to `^0.10.0` and replaced the hand-written
+`database.types.ts` with Supabase's officially generated types.
+
+**Channel management added** (`/channels` page + `createChannel` /
+`updateChannel` / `deleteChannel` server actions). Previously channels
+only existed via the seed migration — now there's a real UI to add,
+edit, and delete them, linked from the sidebar ("+ Add / manage
+channels"). Two of the three seeded mock channels ("Money in Minutes",
+"Mindful Minute") were removed since they had zero real data. **"Desk
+Reset Daily" was deliberately left in place** — 3 real Shorts were
+imported against it during testing — rename it to your actual channel
+name from the Channels page rather than deleting it, to avoid losing
+that test data.
+
+**Development workflow note:** this sandbox can't push to GitHub
+directly (proxy restricts pushes to pre-authorized repos regardless of
+PAT). The working pattern going forward: edits happen here, get written
+into the user's local clone via the device bridge
+(`/Users/ankitbhikadia/workspace/contentadmin`), and the user runs
+`git add -A && git commit && git push` locally. Vercel auto-deploys on
+push to `master`; env vars (`NEXT_PUBLIC_SUPABASE_URL`,
+`NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_SITE_URL`) are set in the
+Vercel dashboard and were a one-time setup step.
+
+### Audit: what's real vs. mocked/stubbed right now
+
+**Real and DB-backed:** auth (magic link), channels (now full CRUD),
+import (real Storage upload + real `shorts` rows), queue (table/board,
+bulk approve), calendar (real drag-to-slot, auto-slot), video detail
+(title/description/tags/settings editing, reviewer notes), dashboard
+stats.
+
+**Honest placeholders (labeled as not-built-yet in the UI, not fake
+data):**
+- Queue's "Generate metadata" bulk button — disabled, needs an AI
+  provider integration (Phase 2).
+- Video detail's "Draft with AI" button — disabled, same as above.
+- Video detail's "Trend read" card — static copy; `trend_score` /
+  `trend_note` columns exist in the schema but nothing ever sets or
+  reads them yet.
+- Auto-uploader page — "Not connected yet" / disabled "Connect this
+  channel" buttons; needs YouTube OAuth (Phase 3) plus a real
+  upload/publish job runner with retry logic. `upload_runs` table
+  exists but nothing ever inserts into it yet.
+- Dashboard's "AI wrote N of M descriptions" callout — the math is real
+  (`metadata_source === "ai"`), but nothing ever sets `metadata_source`
+  to `"ai"` yet, so it always reads 0 until Phase 2 lands.
+
+**Dead scaffold (defined in the schema/types but unused end-to-end,
+no UI at all):**
+- `short_alt_titles` table + `getAltTitles()` — never called from any
+  page.
+- `import_batches` table — never inserted into or read anywhere,
+  despite the Import page mentioning per-batch presets in the plan.
+
+These two are fine to leave as-is until Phase 2 (AI alt-titles) and a
+richer Import flow (batch presets) actually use them — flagging so
+they're not mistaken for bugs.
+
+## Status (2026-08-20, later still) — everything real now
+
+You said: make everything real, nothing mocked/scaffold/fake, ask
+questions if needed. Asked three questions up front (AI provider →
+Claude API; when to set up YouTube OAuth → now; what "trend score"
+means → AI-estimated hook/SEO score) and built out every item from the
+audit above against those answers. Nothing below is a placeholder.
+
+**AI-drafted metadata (`src/lib/ai.ts`)** — real Claude API calls (plain
+`fetch`, no SDK; model configurable via `ANTHROPIC_MODEL`, defaults to
+`claude-sonnet-5`). Drafts title/description/tags/2-3 alt titles/trend
+score+note from the real signals available (current title, description,
+filename, channel name/cadence) — it does not watch the video. Wired
+into: "Draft with AI" on a short's detail page, Queue's bulk "Generate
+metadata" (capped at 10 per click), and a new "Draft on import" toggle
+on the Import page. `short_alt_titles` (previously dead) now gets real
+rows, shown as a clickable "AI alt titles" card. `trend_score`/
+`trend_note` (previously unused columns) now populate a real "Trend
+read" card.
+
+**Real YouTube publishing (`src/lib/youtube.ts`, `src/lib/publish.ts`)**
+— per-channel OAuth connect/disconnect (Channels page and Auto-uploader
+page both link into it), real `videos.insert` upload (multipart, no
+`googleapis` dependency), real token refresh, and a real retry policy:
+3 attempts total tracked via `upload_runs` (previously dead — nothing
+ever inserted into it; now every attempt does), then the short flips to
+`failed` and its slot holds for an hour. Two publish paths share this
+logic: an interactive "Publish now" button (any signed-in user's
+session) and `/api/cron/publish-due` on a 15-minute Vercel Cron
+schedule (`vercel.json`, new), using a service-role Supabase client
+(`src/lib/supabase/service.ts`, new) since a cron request has no user
+session — plus a manual "Check now" button on the Auto-uploader page for
+testing that path without waiting for the schedule.
+
+**Import batch settings** — the Import page previously always created
+plain, unscheduled drafts. It now has real controls: spread new clips'
+slots across N days (round-robin, fixed 16:00 UTC), optionally send
+straight to "needs review" instead of "draft," and optionally trigger AI
+drafting on import. `import_batches` (previously dead) now gets a real
+row per import recording those choices.
+
+**Security/correctness fixes made along the way (caught before
+shipping, not bug reports from you):**
+- `getChannels()` now redacts `youtube_access_token`/
+  `youtube_refresh_token` to `null` before returning — those flow into
+  several client components (Sidebar, Channels, Import, Auto-uploader)
+  and must never reach the browser. A separate `getChannelTokens()`
+  reads the real values, only from server-only code that immediately
+  uses them.
+- The auth middleware was redirecting *every* unauthenticated request to
+  `/login`, including Vercel Cron's bearer-token request to
+  `/api/cron/publish-due` — which would have silently broken the entire
+  auto-uploader (the route's own `CRON_SECRET` check would never even
+  run). Added `/api/cron` to the middleware's public-path allowlist; the
+  route's own secret check still gates it.
+- Auto-uploader copy originally implied a failed-and-exhausted short
+  becomes eligible again automatically — traced the actual query logic
+  and corrected it: re-publishing after 3 failed attempts is a manual
+  "Publish now," not automatic re-pickup.
+
+**New required env vars** (see `.env.example` and the README's
+Deployment section for the full list): `SUPABASE_SERVICE_ROLE_KEY`,
+`ANTHROPIC_API_KEY` (+ optional `ANTHROPIC_MODEL`), `GOOGLE_CLIENT_ID`,
+`GOOGLE_CLIENT_SECRET`, and optional `CRON_SECRET`.
+
+**Known constraint, not yet resolved:** the Google OAuth consent screen
+is in "Testing" mode, which caps YouTube uploads from it to private
+regardless of the `visibility` setting on a short — Google's
+verification review needs to complete before public/scheduled uploads
+actually go out as configured. Also unverified: whether the Vercel plan
+this project is on supports the cron frequency (`*/15 * * * *`) and
+`maxDuration = 300` configured here — both are historically Hobby-plan
+restricted.

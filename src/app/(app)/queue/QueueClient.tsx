@@ -13,7 +13,7 @@ import {
   statusLabel,
   statusTagClass,
 } from "@/lib/format";
-import { bulkApprove } from "@/lib/actions";
+import { bulkApprove, bulkDraftMetadata } from "@/lib/actions";
 
 const BOARD_COLUMNS: { key: string; label: string; statuses: string[] }[] = [
   { key: "draft", label: "Draft", statuses: ["draft"] },
@@ -35,6 +35,8 @@ export default function QueueClient({
   const [layout, setLayout] = useState<"table" | "board">("table");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [isPending, startTransition] = useTransition();
+  const [isDrafting, startDraft] = useTransition();
+  const [draftSummary, setDraftSummary] = useState<string | null>(null);
   const channelById = useMemo(
     () => new Map(channels.map((c) => [c.id, c])),
     [channels]
@@ -62,6 +64,21 @@ export default function QueueClient({
     });
   }
 
+  function onGenerateMetadata() {
+    const ids = Array.from(selected);
+    setDraftSummary(null);
+    startDraft(async () => {
+      const result = await bulkDraftMetadata(ids);
+      const capped = ids.length > 10 ? ` (first 10 of ${ids.length} — run again for the rest)` : "";
+      setDraftSummary(
+        `Drafted ${result.succeeded}${capped}${
+          result.failed.length ? `, ${result.failed.length} failed` : ""
+        }.`
+      );
+      router.refresh();
+    });
+  }
+
   const activeChannelName = activeChannel
     ? channelById.get(activeChannel)?.name
     : null;
@@ -74,7 +91,8 @@ export default function QueueClient({
           <p className="text-muted" style={{ margin: 0, fontSize: "13.5px" }}>
             {shorts.length} short{shorts.length === 1 ? "" : "s"} in flight
             {activeChannelName ? ` on ${activeChannelName}` : ""}. Approve one
-            and it holds its slot until publishing is connected.
+            and, once it&apos;s scheduled on a connected channel, the
+            auto-uploader publishes it for real at its slot.
           </p>
         </div>
         <div className="flex gap-2 items-center">
@@ -106,6 +124,12 @@ export default function QueueClient({
         </div>
       </div>
 
+      {draftSummary && (
+        <div style={{ fontSize: 12.5, color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>
+          {draftSummary}
+        </div>
+      )}
+
       {selected.size > 0 && (
         <div
           className="flex items-center gap-3"
@@ -121,12 +145,12 @@ export default function QueueClient({
           </span>
           <div className="flex gap-2 flex-wrap" style={{ marginLeft: "auto" }}>
             <button
+              onClick={onGenerateMetadata}
+              disabled={isDrafting}
               className="btn btn-secondary"
               style={{ fontSize: 12, padding: "6px 12px", borderColor: "var(--color-accent-600)", color: "var(--color-accent-900)" }}
-              disabled
-              title="AI metadata drafting is coming in a later phase"
             >
-              Generate metadata
+              {isDrafting ? "Drafting…" : "Generate metadata"}
             </button>
             <button
               onClick={onBulkApprove}

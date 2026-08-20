@@ -1,12 +1,55 @@
 import { createClient } from "@/lib/supabase/server";
 import type { Channel, Short, Review, UploadRun } from "@/lib/database.types";
 
+// Channels as returned to the app: OAuth tokens are always redacted here
+// so they never end up in a client component's serialized props. Only
+// src/lib/youtube.ts and the server actions that call it read the real
+// tokens, via getChannelTokens() below — never through this function.
 export async function getChannels(): Promise<Channel[]> {
   const supabase = await createClient();
   const { data, error } = await supabase
     .from("channels")
     .select("*")
     .order("created_at", { ascending: true });
+  if (error) throw error;
+  return (data ?? []).map((c) => ({
+    ...c,
+    youtube_access_token: null,
+    youtube_refresh_token: null,
+  }));
+}
+
+// Server-only: reads the real OAuth tokens for one channel. Never call
+// this from anything whose return value flows into a client component's
+// props — only from server actions / route handlers that immediately use
+// the tokens themselves (e.g. to call YouTube or refresh the token).
+// Accepts whichever Supabase client the caller is already using (the
+// per-request authenticated client, or the service-role client for the
+// no-session cron job) rather than creating its own.
+export async function getChannelTokens(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  channelId: string
+) {
+  const { data, error } = await supabase
+    .from("channels")
+    .select(
+      "id, name, youtube_access_token, youtube_refresh_token, youtube_token_expires_at, youtube_connected"
+    )
+    .eq("id", channelId)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+export async function getDueShorts(limit = 5): Promise<Short[]> {
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("shorts")
+    .select("*")
+    .eq("status", "scheduled")
+    .lte("slot_at", new Date().toISOString())
+    .order("slot_at", { ascending: true })
+    .limit(limit);
   if (error) throw error;
   return data ?? [];
 }

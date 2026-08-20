@@ -1,7 +1,15 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-const PUBLIC_PATHS = ["/login", "/auth/callback"];
+const PUBLIC_PATHS = [
+  "/login",
+  "/auth/callback",
+  // Vercel Cron hits this with a bearer token, not a browser session —
+  // it has to bypass the login redirect. The route itself still checks
+  // CRON_SECRET (see src/app/api/cron/publish-due/route.ts), so this
+  // doesn't weaken auth, it just lets that check run at all.
+  "/api/cron",
+];
 
 export async function updateSession(request: NextRequest) {
   let response = NextResponse.next({ request });

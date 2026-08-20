@@ -2,6 +2,9 @@ import { getChannels, getShorts } from "@/lib/data";
 import QueueClient from "./QueueClient";
 
 export const dynamic = "force-dynamic";
+// Bulk "Generate metadata" makes sequential Claude API calls — give it
+// room beyond the default function timeout.
+export const maxDuration = 300;
 
 export default async function QueuePage({
   searchParams,

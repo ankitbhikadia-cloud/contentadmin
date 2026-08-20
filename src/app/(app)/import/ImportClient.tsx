@@ -6,7 +6,7 @@ import { UploadIcon } from "@/components/icons";
 import type { Channel } from "@/lib/database.types";
 import { formatBytes } from "@/lib/format";
 import { createClient } from "@/lib/supabase/client";
-import { createShortsFromImport } from "@/lib/actions";
+import { createShortsFromImport, type ImportBatchSettings } from "@/lib/actions";
 
 type Row = {
   file: File;
@@ -26,6 +26,10 @@ export default function ImportClient({
   const [rows, setRows] = useState<Row[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const [spreadDays, setSpreadDays] = useState(7);
+  const [aiDraft, setAiDraft] = useState(true);
+  const [sendForReview, setSendForReview] = useState(false);
 
   function addFiles(fileList: FileList | null) {
     if (!fileList) return;
@@ -69,7 +73,8 @@ export default function ImportClient({
     }
 
     if (uploaded.length > 0) {
-      await createShortsFromImport(channelId, uploaded);
+      const settings: ImportBatchSettings = { spreadDays, aiDraft, sendForReview };
+      await createShortsFromImport(channelId, uploaded, settings);
     }
     setIsUploading(false);
     router.push("/queue");
@@ -138,6 +143,48 @@ export default function ImportClient({
             </select>
           </div>
 
+          <div
+            className="flex flex-col gap-3"
+            style={{ padding: "var(--space-3) var(--space-4)", borderRadius: 22, background: "var(--color-surface)" }}
+          >
+            <div style={{ font: "400 15px/1.2 var(--font-heading)" }}>Batch settings</div>
+
+            <div className="field" style={{ maxWidth: 260 }}>
+              <label>Spread slots across how many days</label>
+              <input
+                type="number"
+                min={0}
+                max={90}
+                className="input"
+                value={spreadDays}
+                onChange={(e) => setSpreadDays(Math.max(0, Number(e.target.value) || 0))}
+              />
+              <span className="text-muted" style={{ fontSize: 11, marginTop: 2 }}>
+                {spreadDays > 0
+                  ? `Each clip gets a slot at 16:00 UTC, cycling across the next ${spreadDays} day${spreadDays === 1 ? "" : "s"}.`
+                  : "0 = leave every clip unscheduled in the Inbox."}
+              </span>
+            </div>
+
+            <label className="flex items-center gap-2" style={{ fontSize: 12.5, cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={aiDraft}
+                onChange={(e) => setAiDraft(e.target.checked)}
+              />
+              Draft titles, descriptions & tags with AI on import
+            </label>
+
+            <label className="flex items-center gap-2" style={{ fontSize: 12.5, cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={sendForReview}
+                onChange={(e) => setSendForReview(e.target.checked)}
+              />
+              Send straight to &quot;Needs review&quot; instead of Draft
+            </label>
+          </div>
+
           {rows.length > 0 && (
             <div className="flex flex-col gap-2" style={{ padding: "var(--space-3) var(--space-4) var(--space-4)", borderRadius: 26, background: "var(--color-surface)" }}>
               <div className="flex items-center gap-3 flex-wrap">
@@ -198,9 +245,11 @@ export default function ImportClient({
               Nothing uploads to YouTube from here
             </div>
             <div style={{ fontSize: "11.5px", lineHeight: 1.5, color: "var(--color-accent-2-800)", opacity: 0.85 }}>
-              Imports land in the queue as drafts. A short only reaches
-              YouTube once real publishing is connected, has a slot, and is
-              approved.
+              Imports land in the queue as {sendForReview ? "“needs review”" : "drafts"}
+              {spreadDays > 0 ? `, spread across the next ${spreadDays} day${spreadDays === 1 ? "" : "s"}` : ""}.
+              A short only reaches YouTube once its channel is connected,
+              it has a slot, and it&apos;s approved — the auto-uploader (or
+              &quot;Publish now&quot;) does the actual upload.
             </div>
           </div>
         </div>

@@ -26,7 +26,11 @@ export type Database = {
           id: string;
           name: string;
           sub: string | null;
+          youtube_access_token: string | null;
           youtube_channel_id: string | null;
+          youtube_connected: boolean;
+          youtube_refresh_token: string | null;
+          youtube_token_expires_at: string | null;
         };
         Insert: {
           cadence?: string | null;
@@ -35,7 +39,11 @@ export type Database = {
           id?: string;
           name: string;
           sub?: string | null;
+          youtube_access_token?: string | null;
           youtube_channel_id?: string | null;
+          youtube_connected?: boolean;
+          youtube_refresh_token?: string | null;
+          youtube_token_expires_at?: string | null;
         };
         Update: {
           cadence?: string | null;
@@ -44,7 +52,11 @@ export type Database = {
           id?: string;
           name?: string;
           sub?: string | null;
+          youtube_access_token?: string | null;
           youtube_channel_id?: string | null;
+          youtube_connected?: boolean;
+          youtube_refresh_token?: string | null;
+          youtube_token_expires_at?: string | null;
         };
         Relationships: [];
       };
