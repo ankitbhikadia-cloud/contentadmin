@@ -221,8 +221,14 @@ textarea.input { min-height: 90px; border-radius: 20px; resize: vertical; }
 .grid { display: grid; }
 .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: var(--space-3); }
 .board-grid { display: grid; grid-template-columns: repeat(4, minmax(210px, 1fr)); gap: var(--space-3); align-items: start; }
-.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
-.truncate { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* minmax(0, 1fr), not a bare 1fr: a grid track's default min width is
+   "auto" (its content's intrinsic width), so a long untruncated title in
+   one day cell was letting that cell force its whole column wider than
+   1/7 of the row, pushing Friday/Saturday off the right edge of the
+   page instead of actually being 7 equal columns. minmax(0, ...) caps
+   each track back down to its fair share so .truncate below can do its job. */
+.cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.truncate { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .center-y { display: flex; align-items: center; }
 
 .thumb {

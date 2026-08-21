@@ -113,6 +113,31 @@ export function withHashtags(description: string, tags: string[]): string {
   return trimmed ? `${trimmed}\n\n${toAdd.join(" ")}` : toAdd.join(" ");
 }
 
+// YouTube's real constraint on the `tags` field isn't a count limit on
+// how many tags you can have — it's a total combined-length limit across
+// all of them (the Data API docs put the tags property at 500 characters
+// for the concatenated list). The tag editor on the Shorts detail page,
+// and the AI-drafting clamp in ai.ts's parseDraftedMetadataJson, both use
+// this instead of an arbitrary tag count, so a short can carry as many
+// real tags as will actually fit.
+export const YOUTUBE_TAGS_MAX_CHARS = 500;
+
+export function tagsCharCount(tags: string[]): number {
+  return tags.join(",").length;
+}
+
+// Keeps tags in order, dropping any (and everything after it) that would
+// push the combined total past the limit — used to clamp AI-drafted tag
+// lists, which can otherwise come back with more than will actually fit.
+export function clampTagsToYoutubeLimit(tags: string[]): string[] {
+  const kept: string[] = [];
+  for (const t of tags) {
+    if ([...kept, t].join(",").length > YOUTUBE_TAGS_MAX_CHARS) break;
+    kept.push(t);
+  }
+  return kept;
+}
+
 export type YoutubeUploadMetadata = {
   title: string;
   description: string;

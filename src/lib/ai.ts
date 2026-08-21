@@ -11,6 +11,8 @@
 // on how much real context you give it before drafting — a one-line note
 // in the title/description before hitting "Draft with AI" goes a long way.
 
+import { clampTagsToYoutubeLimit } from "@/lib/youtube";
+
 export type DraftedMetadata = {
   title: string;
   description: string;
@@ -41,7 +43,9 @@ export function parseDraftedMetadataJson(rawText: string): DraftedMetadata {
   return {
     title: p.title.slice(0, 100),
     description: p.description,
-    tags: Array.isArray(p.tags) ? p.tags.slice(0, 15).map(String) : [],
+    // Clamped to YouTube's real combined-character limit on tags, not an
+    // arbitrary count — see clampTagsToYoutubeLimit.
+    tags: Array.isArray(p.tags) ? clampTagsToYoutubeLimit(p.tags.map(String)) : [],
     altTitles: Array.isArray(p.altTitles)
       ? p.altTitles.slice(0, 3).map(String)
       : [],
@@ -90,7 +94,7 @@ this exact shape:
 {
   "title": "string, <=100 chars, hooky but accurate",
   "description": "string, 1-3 sentences",
-  "tags": ["array", "of", "5-10", "short", "lowercase", "keyword", "tags", "no", "#"],
+  "tags": ["array of short, lowercase keyword tags, no # — use as many genuinely relevant ones as you can think of; YouTube allows up to 500 characters total across all tags combined, so aim to use most of that rather than stopping at just a handful"],
   "altTitles": ["2-3 alternate title options"],
   "trendScore": integer 0-100 estimating hook/SEO strength given only these signals,
   "trendNote": "one short sentence explaining the score, e.g. what would make it stronger"

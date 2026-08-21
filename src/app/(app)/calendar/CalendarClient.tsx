@@ -5,6 +5,7 @@ import { ChevronLeftIcon, ChevronRightIcon, PencilIcon, ZapIcon } from "@/compon
 import type { Channel, Short } from "@/lib/database.types";
 import { formatDuration, formatSlotFull } from "@/lib/format";
 import { setSlot } from "@/lib/actions";
+import { defaultEditValue, isLocked } from "@/lib/slot";
 import { useRouter } from "next/navigation";
 
 const SLOT_TIMES = ["06:00", "12:30", "18:00", "21:15"];
@@ -18,31 +19,6 @@ function isoAt(date: Date, hhmm: string) {
 
 function pad(n: number) {
   return String(n).padStart(2, "0");
-}
-
-// datetime-local inputs want "YYYY-MM-DDTHH:mm" in the browser's local
-// time zone, which is also the zone every other date built in this file
-// (isoAt above) already uses — so this is a plain reformat, not a zone
-// conversion.
-function toDatetimeLocalValue(iso: string) {
-  const d = new Date(iso);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-function defaultEditValue(short: Short) {
-  if (short.slot_at) return toDatetimeLocalValue(short.slot_at);
-  const d = new Date();
-  d.setDate(d.getDate() + 1);
-  d.setHours(18, 0, 0, 0);
-  return toDatetimeLocalValue(d.toISOString());
-}
-
-// A short that's already actually public on YouTube has no "scheduled
-// time" left to move — see setSlot in actions.ts, which enforces this
-// same rule server-side. This mirrors it client-side just to grey the
-// short out and explain why, before a doomed request round-trips.
-function isLocked(short: Short) {
-  return short.status === "live" && (!short.slot_at || new Date(short.slot_at) <= new Date());
 }
 
 type PendingMove = { short: Short; newSlotIso: string };
@@ -199,7 +175,7 @@ export default function CalendarClient({
         <div style={{ fontSize: 12.5, color: "var(--color-accent-700)" }}>{actionError}</div>
       )}
 
-      <div className="grid" style={{ gridTemplateColumns: "1fr 268px", gap: "var(--space-4)", alignItems: "start" }}>
+      <div className="grid" style={{ gridTemplateColumns: "minmax(0, 1fr) 268px", gap: "var(--space-4)", alignItems: "start" }}>
         <div style={{ padding: "var(--space-3)", borderRadius: 26, background: "var(--color-surface)" }}>
           <div className="cal-grid" style={{ marginBottom: 6 }}>
             {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => (
@@ -236,6 +212,7 @@ export default function CalendarClient({
                   className="flex flex-col"
                   style={{
                     minHeight: 104,
+                    minWidth: 0,
                     gap: 4,
                     padding: 7,
                     borderRadius: 16,
@@ -281,6 +258,7 @@ export default function CalendarClient({
                         style={{
                           padding: "3px 4px 3px 6px",
                           borderRadius: 999,
+                          minWidth: 0,
                           background:
                             s.status === "live"
                               ? "var(--color-accent-2-100)"

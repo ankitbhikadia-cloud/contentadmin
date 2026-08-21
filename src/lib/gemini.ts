@@ -304,7 +304,7 @@ this exact shape:
 {
   "title": "string, <=100 chars, hooky but accurate to what's actually in the video",
   "description": "string, 1-3 sentences describing what actually happens/is said",
-  "tags": ["array", "of", "5-10", "short", "lowercase", "keyword", "tags", "no", "#"],
+  "tags": ["array of short, lowercase keyword tags, no # — use as many genuinely relevant ones as the video actually supports; YouTube allows up to 500 characters total across all tags combined, so aim to use most of that rather than stopping at just a handful"],
   "altTitles": ["2-3 alternate title options"],
   "trendScore": integer 0-100 estimating hook/SEO strength given the actual content,
   "trendNote": "one short sentence explaining the score"

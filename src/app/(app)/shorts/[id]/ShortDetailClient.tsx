@@ -19,7 +19,10 @@ import {
   useAltTitle,
   publishShortNow,
   syncMetadataToYoutube,
+  setSlot,
 } from "@/lib/actions";
+import { defaultEditValue, isLocked } from "@/lib/slot";
+import { YOUTUBE_TAGS_MAX_CHARS, tagsCharCount } from "@/lib/youtube";
 
 export default function ShortDetailClient({
   short,
@@ -28,6 +31,7 @@ export default function ShortDetailClient({
   altTitles,
   currentUserEmail,
   videoAiConfigured,
+  videoUrl,
 }: {
   short: Short;
   channel: Channel | null;
@@ -35,6 +39,7 @@ export default function ShortDetailClient({
   altTitles: ShortAltTitle[];
   currentUserEmail: string;
   videoAiConfigured: boolean;
+  videoUrl: string | null;
 }) {
   const router = useRouter();
   const willWatchVideo = videoAiConfigured && !!short.file_path;
@@ -84,6 +89,19 @@ export default function ShortDetailClient({
   const [syncError, setSyncError] = useState<string | null>(null);
   const [syncedJustNow, setSyncedJustNow] = useState(false);
 
+  // Precise-time editing, right here on the short's own page — same
+  // two-step "pick a time, then confirm" flow as the calendar's pencil
+  // editor (see CalendarClient.tsx), sharing its slot-locked check and
+  // its datetime-local formatting via src/lib/slot.ts so the two editors
+  // can't quietly drift apart. Kept as an inline expand/confirm rather
+  // than a modal since this page has room for it.
+  const [isSlotEditing, setSlotEditing] = useState(false);
+  const [slotValue, setSlotValue] = useState("");
+  const [slotConfirmIso, setSlotConfirmIso] = useState<string | null>(null);
+  const [slotError, setSlotError] = useState<string | null>(null);
+  const [isSlotSaving, startSlotSave] = useTransition();
+  const slotLocked = isLocked(short);
+
   function markDirty<T>(setter: (v: T) => void) {
     return (v: T) => {
       setter(v);
@@ -95,7 +113,11 @@ export default function ShortDetailClient({
     if (e.key !== "Enter") return;
     e.preventDefault();
     const t = tagDraft.trim().replace(/^#?/, "#");
-    if (t.length > 1 && !tags.includes(t) && tags.length < 15) {
+    // YouTube's real limit here isn't a tag count, it's a combined
+    // character total across every tag (see YOUTUBE_TAGS_MAX_CHARS) — so
+    // this checks the actual projected total instead of an arbitrary count.
+    const projectedChars = [...tags, t].join(",").length;
+    if (t.length > 1 && !tags.includes(t) && projectedChars <= YOUTUBE_TAGS_MAX_CHARS) {
       setTags([...tags, t]);
       setDirty(true);
     }
@@ -187,6 +209,40 @@ export default function ShortDetailClient({
     });
   }
 
+  function openSlotEditor() {
+    if (slotLocked) return;
+    setSlotError(null);
+    setSlotConfirmIso(null);
+    setSlotValue(defaultEditValue(short));
+    setSlotEditing(true);
+  }
+
+  function cancelSlotEdit() {
+    setSlotEditing(false);
+    setSlotConfirmIso(null);
+    setSlotError(null);
+  }
+
+  function stageSlotChange() {
+    if (!slotValue) return;
+    setSlotConfirmIso(new Date(slotValue).toISOString());
+  }
+
+  function confirmSlotChange() {
+    if (!slotConfirmIso) return;
+    startSlotSave(async () => {
+      const result = await setSlot(short.id, slotConfirmIso);
+      if (!result.ok) {
+        setSlotError(result.error);
+        return;
+      }
+      setSlotEditing(false);
+      setSlotConfirmIso(null);
+      setSlotError(null);
+      router.refresh();
+    });
+  }
+
   return (
     <div className="page" style={{ maxWidth: 1180 }}>
       <div className="flex items-center gap-2">
@@ -206,38 +262,61 @@ export default function ShortDetailClient({
               position: "relative",
               aspectRatio: "9/16",
               borderRadius: 24,
-              background: "var(--color-neutral-200)",
+              background: videoUrl ? "#000" : "var(--color-neutral-200)",
               border: "1px solid var(--color-divider)",
               display: "grid",
               placeItems: "center",
               overflow: "hidden",
             }}
           >
-            <div className="flex flex-col items-center gap-2">
-              <div style={{ width: 52, height: 52, borderRadius: 999, background: "color-mix(in srgb, var(--color-neutral-900) 12%, transparent)", display: "grid", placeItems: "center" }}>
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="var(--color-neutral-700)">
-                  <path d="M8 5l11 7-11 7z" />
-                </svg>
-              </div>
-              <span style={{ fontSize: 11, color: "var(--color-neutral-700)" }}>
-                {short.file_name ?? "no file yet"}
-              </span>
-            </div>
-            <span
-              style={{
-                position: "absolute",
-                bottom: 10,
-                right: 10,
-                font: "700 10px/1 var(--font-body)",
-                background: "color-mix(in srgb, var(--color-neutral-900) 72%, transparent)",
-                color: "var(--color-bg)",
-                padding: "4px 7px",
-                borderRadius: 999,
-              }}
-            >
-              {formatDuration(short.duration_seconds)}
-            </span>
+            {videoUrl ? (
+              // A signed URL from Supabase Storage (generated server-side
+              // in page.tsx, since the "shorts" bucket is private) — plays
+              // the actual uploaded file right here so it can be checked
+              // before it goes out, rather than only ever seeing it live
+              // on YouTube after the fact.
+              <video
+                key={videoUrl}
+                src={videoUrl}
+                controls
+                playsInline
+                preload="metadata"
+                style={{ width: "100%", height: "100%", objectFit: "contain" }}
+              />
+            ) : (
+              <>
+                <div className="flex flex-col items-center gap-2">
+                  <div style={{ width: 52, height: 52, borderRadius: 999, background: "color-mix(in srgb, var(--color-neutral-900) 12%, transparent)", display: "grid", placeItems: "center" }}>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="var(--color-neutral-700)">
+                      <path d="M8 5l11 7-11 7z" />
+                    </svg>
+                  </div>
+                  <span style={{ fontSize: 11, color: "var(--color-neutral-700)", padding: "0 12px", textAlign: "center" }}>
+                    {short.file_path ? "Preview unavailable — try refreshing" : "no file yet"}
+                  </span>
+                </div>
+                <span
+                  style={{
+                    position: "absolute",
+                    bottom: 10,
+                    right: 10,
+                    font: "700 10px/1 var(--font-body)",
+                    background: "color-mix(in srgb, var(--color-neutral-900) 72%, transparent)",
+                    color: "var(--color-bg)",
+                    padding: "4px 7px",
+                    borderRadius: 999,
+                  }}
+                >
+                  {formatDuration(short.duration_seconds)}
+                </span>
+              </>
+            )}
           </div>
+          {short.file_name && (
+            <div style={{ fontSize: 11, lineHeight: 1.4, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", padding: "0 2px", wordBreak: "break-word" }}>
+              {short.file_name}
+            </div>
+          )}
           <div className="card elev-sm" style={{ gap: "var(--space-2)" }}>
             <div className="card-kicker">Trend read</div>
             {short.trend_score != null ? (
@@ -361,7 +440,10 @@ export default function ShortDetailClient({
             </div>
             <div className="field">
               <label>
-                Tags <span style={{ opacity: 0.55 }}>· {tags.length} of 15</span>
+                Tags{" "}
+                <span style={{ opacity: 0.55 }}>
+                  · {tagsCharCount(tags)}/{YOUTUBE_TAGS_MAX_CHARS} chars (YouTube's real limit)
+                </span>
               </label>
               <div
                 className="flex flex-wrap gap-1"
@@ -393,7 +475,7 @@ export default function ShortDetailClient({
                   onChange={(e) => setTagDraft(e.target.value)}
                   onKeyDown={addTag}
                   placeholder="add a tag…"
-                  disabled={tags.length >= 15}
+                  disabled={tagsCharCount(tags) >= YOUTUBE_TAGS_MAX_CHARS}
                   style={{ border: 0, background: "transparent", outline: "none", fontSize: "11.5px", flex: 1, minWidth: 80 }}
                 />
               </div>
@@ -456,9 +538,92 @@ export default function ShortDetailClient({
             <div className="flex flex-col gap-3" style={{ padding: "var(--space-4)", borderRadius: 26, background: "var(--color-surface)" }}>
               <div style={{ font: "400 17px/1 var(--font-heading)" }}>Slot</div>
               <div style={{ fontSize: 14 }}>{formatSlotFull(short.slot_at)}</div>
-              <Link href="/calendar" className="btn btn-secondary" style={{ alignSelf: "flex-start", fontSize: "12.5px" }}>
-                Change on calendar
-              </Link>
+
+              {slotLocked && (
+                <div style={{ fontSize: 11.5, lineHeight: 1.4, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+                  Already public on YouTube — its publish time can&apos;t be changed anymore.
+                </div>
+              )}
+
+              {!isSlotEditing ? (
+                <div className="flex gap-2">
+                  <button
+                    onClick={openSlotEditor}
+                    disabled={slotLocked}
+                    className="btn btn-secondary"
+                    style={{ fontSize: "12.5px" }}
+                  >
+                    Edit time
+                  </button>
+                  <Link href="/calendar" className="btn btn-ghost" style={{ fontSize: "12.5px" }}>
+                    Open calendar
+                  </Link>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  <input
+                    type="datetime-local"
+                    className="input"
+                    value={slotValue}
+                    onChange={(e) => {
+                      setSlotValue(e.target.value);
+                      setSlotConfirmIso(null);
+                    }}
+                  />
+                  {!slotConfirmIso ? (
+                    <div className="flex gap-2">
+                      <button onClick={cancelSlotEdit} className="btn btn-ghost" style={{ fontSize: "12.5px" }}>
+                        Cancel
+                      </button>
+                      <button
+                        onClick={stageSlotChange}
+                        disabled={!slotValue}
+                        className="btn btn-primary"
+                        style={{ fontSize: "12.5px" }}
+                      >
+                        Continue
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-2" style={{ padding: "var(--space-2) var(--space-3)", borderRadius: 16, background: "var(--color-bg)" }}>
+                      <div style={{ fontSize: 12, lineHeight: 1.5 }}>
+                        {short.slot_at ? (
+                          <>Move to <strong>{formatSlotFull(slotConfirmIso)}</strong>?</>
+                        ) : (
+                          <>Schedule for <strong>{formatSlotFull(slotConfirmIso)}</strong>?</>
+                        )}
+                      </div>
+                      {short.status === "live" && (
+                        <div style={{ fontSize: 11, lineHeight: 1.45, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+                          This short is already uploaded and privately scheduled on YouTube — its publish time there will be updated to match.
+                        </div>
+                      )}
+                      <div className="flex gap-2" style={{ justifyContent: "flex-end" }}>
+                        <button
+                          onClick={() => setSlotConfirmIso(null)}
+                          disabled={isSlotSaving}
+                          className="btn btn-ghost"
+                          style={{ fontSize: "12.5px" }}
+                        >
+                          Back
+                        </button>
+                        <button
+                          onClick={confirmSlotChange}
+                          disabled={isSlotSaving}
+                          className="btn btn-primary"
+                          style={{ fontSize: "12.5px" }}
+                        >
+                          {isSlotSaving ? "Saving…" : "Confirm"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {slotError && (
+                    <div style={{ fontSize: 11.5, color: "var(--color-accent-700)" }}>{slotError}</div>
+                  )}
+                </div>
+              )}
+
               {channel?.youtube_connected ? (
                 <div className="flex flex-col gap-2" style={{ marginTop: "auto" }}>
                   <button

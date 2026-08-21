@@ -512,3 +512,88 @@ set directly on the short's row (recovering the row from its
 inconsistent state) and the extra duplicate deleted manually on YouTube
 (deletion is intentionally not something this app or Claude does on the
 user's behalf).
+
+## Status (2026-08-21) — edit the time from a short's own page; calendar grid overflow fixed
+
+Two requests: (1) rescheduling a short required going to `/calendar` —
+wanted the same ability right on `/shorts/[id]`; (2) the calendar's
+month grid was overflowing sideways, cutting off Friday/Saturday.
+
+**Edit time on the Shorts detail page.** The "Slot" card now has an
+"Edit time" button next to the existing "Open calendar" link (renamed
+from "Change on calendar" now that it's no longer the only way). Clicking
+it expands the same `datetime-local` → confirm flow the calendar's
+pencil editor uses: pick a time, "Continue", then an inline confirm
+("Move to ... ?" / "Schedule for ... ?", with an extra note when the
+short is already live, since that path syncs the reschedule to YouTube)
+before anything is actually written. Disabled (with an explanatory line)
+once the short is actually public on YouTube, same rule as the calendar.
+
+This reuses `setSlot` from `actions.ts` as-is — no server-side changes
+needed, since it already handles both the plain-DB-update case and the
+live-short-with-YouTube-sync case. The small bits of client logic that
+were living only inside `CalendarClient.tsx` (`defaultEditValue`,
+`isLocked`, the datetime-local formatting) moved out into a new
+`src/lib/slot.ts` so both editors share one implementation instead of
+two copies that could quietly drift apart over time.
+
+**Calendar grid overflow.** Root cause: `.cal-grid`'s columns were a
+bare `repeat(7, 1fr)`. A CSS grid track's default minimum width is
+`auto` — its content's intrinsic width — not zero, so a day cell with a
+long, untruncated title could force that whole column wider than 1/7 of
+the row, and the rest of the grid got pushed right until Friday/Saturday
+fell off the visible page (`.truncate` was set on the title text, but
+`.truncate` alone doesn't help unless something in the chain first
+actually constrains the width — it had no `min-width: 0` either).
+Fixed by:
+- `.cal-grid` → `repeat(7, minmax(0, 1fr))` so each column is capped at
+  its fair share instead of growing to fit its widest cell.
+- `.truncate` → added `min-width: 0`, so a truncated element can
+  actually shrink instead of just clipping visually while still forcing
+  its container wider.
+- The calendar's own two-column page layout (`1fr 268px` for the grid +
+  Inbox panel) → `minmax(0, 1fr) 268px`, same reasoning one level up.
+- `min-width: 0` added to the day-cell container and each scheduled-item
+  pill so the shrink constraint actually reaches the truncated title
+  inside them.
+
+Net effect: the month grid now always fits the page width (all 7 days
+visible, no horizontal scroll), and long titles ellipsize instead of
+pushing the layout around.
+
+## Status (2026-08-21, later) — real video playback on the Shorts page; tags maximized to YouTube's actual limit
+
+Two more requests: play the actual uploaded video right on `/shorts/[id]`
+(so it can be checked before it goes anywhere), and stop capping tags at
+an arbitrary count — fill them out to whatever YouTube itself allows.
+
+**Video playback.** The preview panel used to be a static placeholder
+(play-icon + filename, no real video). The `shorts` Storage bucket is
+private — RLS-scoped to channel members (migrations `0001`/`0006`) — so
+this needed a signed URL, not a public one. `page.tsx` (a Server
+Component, already running with the signed-in user's session) now calls
+`supabase.storage.from("shorts").createSignedUrl(short.file_path, 2h)`
+and passes the result down as a new `videoUrl` prop. `ShortDetailClient`
+renders a real `<video controls playsInline>` from that URL when present
+(falling back to the old placeholder — now distinguishing "no file yet"
+from "file exists but the signed URL didn't come back" — when it isn't).
+Nothing server-side changed beyond that one read; RLS still governs
+whether `createSignedUrl` succeeds at all for a given user.
+
+**Tags maximized to YouTube's real limit.** The tag editor was capped at
+an arbitrary 15 tags, and the AI-drafting parse in `ai.ts` silently
+truncated to the same 15 — neither number came from YouTube. YouTube's
+actual constraint on the `tags` field is a **combined character total**
+across all tags (documented at 500 characters), not a count. Added
+`YOUTUBE_TAGS_MAX_CHARS` (500), `tagsCharCount`, and
+`clampTagsToYoutubeLimit` to `youtube.ts` as the one place this rule
+lives, and used it in three places:
+- `ShortDetailClient.tsx`'s manual tag editor now tracks `{used}/500
+  chars` instead of `{count} of 15`, and only blocks adding a tag once
+  the real 500-char total would be exceeded.
+- `ai.ts`'s `parseDraftedMetadataJson` (shared by both the Claude
+  text-only path and Gemini's video-aware path) now clamps AI-drafted
+  tags to the same real limit instead of an arbitrary count of 15.
+- Both AI prompts (`ai.ts` and `gemini.ts`) were nudged from "5-10 tags"
+  to explicitly aim for using most of the 500-character budget, so
+  "Draft with AI" actually fills tags out rather than stopping early.
