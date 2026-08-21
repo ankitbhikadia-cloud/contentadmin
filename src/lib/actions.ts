@@ -5,7 +5,13 @@ import { createClient } from "@/lib/supabase/server";
 import { draftShortMetadata } from "@/lib/ai";
 import { draftMetadataFromVideo } from "@/lib/gemini";
 import { publishShort, getValidAccessToken, type PublishResult } from "@/lib/publish";
-import { getVideoStatus, updateScheduledPublishTime } from "@/lib/youtube";
+import {
+  getVideoStatus,
+  updateScheduledPublishTime,
+  getVideoSnippet,
+  updateVideoSnippet,
+  withHashtags,
+} from "@/lib/youtube";
 import { getDueShorts } from "@/lib/data";
 
 export async function approveShort(id: string) {
@@ -584,4 +590,45 @@ export async function checkAndPublishDue(): Promise<{
   revalidatePath("/queue");
   revalidatePath("/dashboard");
   return { checked: due.length, succeeded, failed: due.length - succeeded };
+}
+
+/**
+ * Pushes this short's current title/description/tags to its
+ * already-uploaded YouTube video — for when the metadata changed after
+ * publishing (a later "Draft with AI" run, a manual edit) and the real
+ * video on YouTube needs to catch up. Only meaningful for a short that
+ * already has a recorded youtube_video_id; publishShort (in publish.ts)
+ * is the one-time upload, this is the repeatable metadata sync.
+ */
+export async function syncMetadataToYoutube(shortId: string): Promise<RescheduleResult> {
+  const supabase = await createClient();
+  const { data: short, error: fetchErr } = await supabase
+    .from("shorts")
+    .select("*")
+    .eq("id", shortId)
+    .maybeSingle();
+  if (fetchErr) return { ok: false, error: fetchErr.message };
+  if (!short) return { ok: false, error: "Short not found." };
+  if (!short.youtube_video_id) {
+    return { ok: false, error: "This short has no recorded YouTube video id yet — nothing to sync to." };
+  }
+
+  try {
+    const accessToken = await getValidAccessToken(supabase, short.channel_id);
+    const currentSnippet = await getVideoSnippet(accessToken, short.youtube_video_id);
+    if (!currentSnippet) {
+      return { ok: false, error: "Couldn't find this video on YouTube anymore." };
+    }
+    await updateVideoSnippet(accessToken, short.youtube_video_id, currentSnippet, {
+      title: short.title,
+      description: withHashtags(short.description, short.tags ?? []),
+      tags: short.tags ?? [],
+    });
+  } catch (err) {
+    console.error(`syncMetadataToYoutube(${shortId}) failed:`, err);
+    return { ok: false, error: err instanceof Error ? err.message : "Couldn't sync to YouTube." };
+  }
+
+  revalidatePath(`/shorts/${shortId}`);
+  return { ok: true };
 }

@@ -97,6 +97,22 @@ export async function refreshAccessToken(refreshToken: string): Promise<TokenSet
   return res.json();
 }
 
+// YouTube's separate "tags" field is metadata only — it's never shown to
+// viewers anywhere in the UI, only used for search/discovery. Hashtags
+// actually written into the description (or title) are what's visible
+// and clickable, and are what most creators mean by "add tags" in
+// practice. Appended here rather than replacing the description, and
+// skipped for a tag already present as a hashtag so re-syncing doesn't
+// keep duplicating the same line.
+export function withHashtags(description: string, tags: string[]): string {
+  const toAdd = tags
+    .map((t) => `#${t.replace(/^#/, "").replace(/\s+/g, "")}`)
+    .filter((tag) => tag.length > 1 && !description.includes(tag));
+  if (!toAdd.length) return description;
+  const trimmed = description.trim();
+  return trimmed ? `${trimmed}\n\n${toAdd.join(" ")}` : toAdd.join(" ");
+}
+
 export type YoutubeUploadMetadata = {
   title: string;
   description: string;
@@ -225,5 +241,74 @@ export async function updateScheduledPublishTime(
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`YouTube reschedule failed (${res.status}): ${body.slice(0, 300)}`);
+  }
+}
+
+export type YoutubeVideoSnippet = {
+  title: string;
+  description: string;
+  tags?: string[];
+  categoryId: string;
+  [key: string]: unknown;
+};
+
+/**
+ * Fetches a video's current `snippet` part. Needed before updating it —
+ * see updateVideoSnippet — since videos.update replaces the whole part,
+ * and categoryId in particular is required by the API but isn't
+ * something this app tracks, so it has to come from what YouTube
+ * already has rather than being invented here.
+ */
+export async function getVideoSnippet(
+  accessToken: string,
+  videoId: string
+): Promise<YoutubeVideoSnippet | null> {
+  const res = await fetch(
+    `${YOUTUBE_VIDEOS_URL}?part=snippet&id=${encodeURIComponent(videoId)}`,
+    { headers: { authorization: `Bearer ${accessToken}` } }
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`YouTube video snippet lookup failed (${res.status}): ${body.slice(0, 300)}`);
+  }
+  const json = await res.json();
+  const item = json?.items?.[0];
+  if (!item) return null;
+  return item.snippet ?? null;
+}
+
+/**
+ * Pushes this app's current title/description/tags to an already-
+ * uploaded video — used by "Sync to YouTube" for a live short whose
+ * metadata changed after it was published (e.g. tags added by "Draft
+ * with AI" after the fact, or a manual edit). Merges into the existing
+ * snippet rather than sending a bare {title, description, tags}, for
+ * the same reason as updateScheduledPublishTime above.
+ */
+export async function updateVideoSnippet(
+  accessToken: string,
+  videoId: string,
+  currentSnippet: YoutubeVideoSnippet,
+  updates: { title: string; description: string; tags: string[] }
+): Promise<void> {
+  const res = await fetch(`${YOUTUBE_VIDEOS_URL}?part=snippet`, {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      id: videoId,
+      snippet: {
+        ...currentSnippet,
+        title: updates.title.slice(0, 100),
+        description: updates.description,
+        tags: updates.tags,
+      },
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`YouTube snippet update failed (${res.status}): ${body.slice(0, 300)}`);
   }
 }

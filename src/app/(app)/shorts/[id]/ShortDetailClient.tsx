@@ -18,6 +18,7 @@ import {
   draftMetadata,
   useAltTitle,
   publishShortNow,
+  syncMetadataToYoutube,
 } from "@/lib/actions";
 
 export default function ShortDetailClient({
@@ -76,9 +77,12 @@ export default function ShortDetailClient({
   const [isNoting, startNote] = useTransition();
   const [isDrafting, startDraft] = useTransition();
   const [isPublishing, startPublish] = useTransition();
+  const [isSyncing, startSync] = useTransition();
   const [draftError, setDraftError] = useState<string | null>(null);
   const [publishError, setPublishError] = useState<string | null>(null);
   const [publishedId, setPublishedId] = useState<string | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [syncedJustNow, setSyncedJustNow] = useState(false);
 
   function markDirty<T>(setter: (v: T) => void) {
     return (v: T) => {
@@ -165,6 +169,20 @@ export default function ShortDetailClient({
         return;
       }
       setPublishedId(result.videoId);
+      router.refresh();
+    });
+  }
+
+  function syncToYoutube() {
+    setSyncError(null);
+    setSyncedJustNow(false);
+    startSync(async () => {
+      const result = await syncMetadataToYoutube(short.id);
+      if (!result.ok) {
+        setSyncError(result.error);
+        return;
+      }
+      setSyncedJustNow(true);
       router.refresh();
     });
   }
@@ -469,6 +487,29 @@ export default function ShortDetailClient({
                     >
                       View on YouTube →
                     </a>
+                  )}
+                  {short.youtube_video_id && (
+                    <>
+                      <button
+                        onClick={syncToYoutube}
+                        disabled={isSyncing}
+                        className="btn btn-secondary"
+                        style={{ fontSize: "12.5px" }}
+                        title="Pushes this short's current title, description, and tags to the YouTube video — use this after editing metadata for an already-published short."
+                      >
+                        {isSyncing ? "Syncing…" : "Sync title/description/tags to YouTube"}
+                      </button>
+                      {syncError && (
+                        <span style={{ fontSize: 11.5, color: "var(--color-accent-700)" }}>
+                          {syncError}
+                        </span>
+                      )}
+                      {syncedJustNow && !syncError && (
+                        <span style={{ fontSize: 11.5, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+                          Synced.
+                        </span>
+                      )}
+                    </>
                   )}
                 </div>
               ) : (

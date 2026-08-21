@@ -1,6 +1,11 @@
 import type { createClient } from "@/lib/supabase/server";
 import { getChannelTokens } from "@/lib/data";
-import { refreshAccessToken, uploadVideoToYoutube, type YoutubeUploadMetadata } from "@/lib/youtube";
+import {
+  refreshAccessToken,
+  uploadVideoToYoutube,
+  withHashtags,
+  type YoutubeUploadMetadata,
+} from "@/lib/youtube";
 
 export type PublishResult = { ok: true; videoId: string } | { ok: false; error: string };
 
@@ -61,6 +66,18 @@ export async function publishShort(
   if (!short) return { ok: false, error: "Short not found." };
   if (!short.file_path) return { ok: false, error: "This short has no uploaded file." };
 
+  // A short that already has a recorded YouTube video id has already been
+  // uploaded — publishing again would create a genuine duplicate video on
+  // YouTube. This guard is what actually stops that from happening;
+  // "Sync to YouTube" (src/lib/actions.ts) is the right way to push a
+  // metadata change to an already-live video instead.
+  if (short.youtube_video_id) {
+    return {
+      ok: false,
+      error: `This short already has a YouTube video (id: ${short.youtube_video_id}) — publishing again would create a duplicate. Use "Sync to YouTube" to update its title/description/tags instead, or delete the existing video on YouTube first if it genuinely needs to be re-uploaded.`,
+    };
+  }
+
   // Checked here, before touching upload_runs/status at all, so a channel
   // that was simply never connected doesn't count as a failed *upload*
   // attempt against the retry budget below — same behavior as before this
@@ -86,7 +103,10 @@ export async function publishShort(
 
     const metadata: YoutubeUploadMetadata = {
       title: short.title,
-      description: short.description,
+      // Tags only ever populate YouTube's search-index "tags" field,
+      // which is never shown to viewers — hashtags in the description
+      // are what's actually visible/clickable, so both get the tags.
+      description: withHashtags(short.description, short.tags ?? []),
       tags: short.tags ?? [],
       privacyStatus: (short.visibility as YoutubeUploadMetadata["privacyStatus"]) ?? "public",
       selfDeclaredMadeForKids: short.made_for_kids,
@@ -100,10 +120,53 @@ export async function publishShort(
       metadata
     );
 
-    await supabase
-      .from("shorts")
-      .update({ status: "live", youtube_video_id: videoId })
-      .eq("id", shortId);
+    // The video is now genuinely live on YouTube regardless of what
+    // happens next — everything below is just recording that fact. This
+    // used to be an unchecked update: when it failed (as it did once, for
+    // real, in production), the short silently stayed "not live" in our
+    // own data, which both hid a real error and left the short looking
+    // publishable again — a second manual "Publish now" click then
+    // uploaded a genuine duplicate video. A couple of quick retries here
+    // covers a transient blip; if it still fails, the video id is
+    // returned in the error itself so it's never lost, and the caller is
+    // told explicitly not to publish again.
+    let markLiveErr: { message: string } | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const { error } = await supabase
+        .from("shorts")
+        .update({ status: "live", youtube_video_id: videoId })
+        .eq("id", shortId);
+      markLiveErr = error;
+      if (!error) break;
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 1000));
+    }
+    if (markLiveErr) {
+      console.error(
+        `publishShort(${shortId}) uploaded to YouTube (video id ${videoId}) but failed to record it as live:`,
+        markLiveErr
+      );
+      // The full update (status + youtube_video_id) is what just failed
+      // 3 times, so whatever's wrong might be specific to one of those
+      // columns — try status alone as a last resort. The daily cron only
+      // re-publishes shorts with status "scheduled" (see getDueShorts),
+      // so this is what actually stops an automatic duplicate re-upload
+      // even though the video id itself didn't make it into our data.
+      const { error: fallbackErr } = await supabase
+        .from("shorts")
+        .update({ status: "failed" })
+        .eq("id", shortId);
+      if (fallbackErr) {
+        console.error(
+          `publishShort(${shortId}) fallback status="failed" write ALSO failed — this short may still auto-retry and duplicate-upload:`,
+          fallbackErr
+        );
+      }
+      return {
+        ok: false,
+        error: `Uploaded to YouTube successfully (video id: ${videoId}) but failed to save that to the database after 3 attempts: ${markLiveErr.message}. Do NOT publish this short again — it's already live. Note the video id above so it can be reconciled manually.`,
+      };
+    }
+
     await supabase.from("upload_runs").insert({
       short_id: shortId,
       state: "live",

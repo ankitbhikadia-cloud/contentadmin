@@ -463,3 +463,52 @@ interpreted as covering individual moves (drag or the exact-time editor)
 — bulk "Auto-slot the inbox" stayed a single immediate action, since the
 button click is itself the deliberate/explicit step and a per-item
 confirm across a whole batch would defeat the point of "auto".
+
+### Real incident: a silent DB write failure caused a duplicate YouTube upload
+
+You reported a published video had no tags, even though the short's
+tags in our own data were real and correct
+(`fufaji, desi comedy, indian wedding, alien comedy, ai animation,
+hindi comedy, funny shorts`). Root cause, found via `upload_runs`: this
+one short has **two** `state: "live"` upload attempts (19:49:18 and
+19:53:30) — a genuine duplicate video on YouTube — while the `shorts`
+row itself still reads `status: "approved"`, `youtube_video_id: null`.
+
+`publishShort`'s final step — `.update({status: "live",
+youtube_video_id: videoId})` — was never error-checked. Both times, that
+write silently failed (root DB/RLS cause unconfirmed — it never got
+logged, which is exactly the gap), so the short kept looking
+unpublished and got manually re-published. Because both real uploads
+happened before "Draft with AI" (video-aware) had generated real tags on
+this short, neither actual YouTube video has them — that's what you saw.
+
+Fixed in `publish.ts`:
+- The mark-as-live write is now retried up to 3 times and its result
+  actually checked. If it still fails, the function returns a real
+  error (never a false "published!") that includes the YouTube video id
+  so it's never lost, and falls back to at least writing `status:
+  "failed"` so the daily cron (which only re-publishes `status:
+  "scheduled"` shorts) can't pile on a second automatic duplicate.
+- Added a guard: a short that already has a recorded
+  `youtube_video_id` now refuses to publish again outright ("would
+  create a duplicate") — the real backstop against a repeat of this.
+- The description sent to YouTube now gets the short's tags appended as
+  hashtags (`youtube.ts`'s new `withHashtags`) in addition to the
+  separate tags field — tags-the-field is metadata only, never shown to
+  viewers, so this is what actually makes them visible.
+- Added `syncMetadataToYoutube` (a new "Sync title/description/tags to
+  YouTube" button on an already-published short) so metadata that
+  changes *after* publishing — like this one, where the real tags only
+  existed after the fact — can be pushed to the live video without a
+  re-upload. `youtube.ts` gained `getVideoSnippet`/`updateVideoSnippet`
+  for this (same fetch-then-merge pattern as the calendar reschedule's
+  `getVideoStatus`/`updateScheduledPublishTime`, since `videos.update`
+  replaces the whole part it's given).
+
+Not yet resolved: the two real duplicate videos already on YouTube, and
+this short's `youtube_video_id` being null in our data. Fixing those
+needs the actual YouTube video URL/ID from Ankit — once known, it can be
+set directly on the short's row (recovering the row from its
+inconsistent state) and the extra duplicate deleted manually on YouTube
+(deletion is intentionally not something this app or Claude does on the
+user's behalf).
